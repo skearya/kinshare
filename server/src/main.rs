@@ -5,7 +5,7 @@ fn main() -> anyhow::Result<()> {
     println!("Listening on {:#?}", socket.local_addr()?);
 
     let mut buffer = vec![];
-    let mut msg = [0; 65535];
+    let mut msg = vec![0; 65535].into_boxed_slice();
 
     loop {
         let n = socket.recv(&mut msg)?;

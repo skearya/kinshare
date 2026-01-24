@@ -49,7 +49,7 @@ pub struct VarScreeninfo {
 }
 
 /// Struct as defined in /usr/include/linux/fb.h Note: type is a keyword in Rust and therefore has been
-/// changed to fb_type.
+/// changed to `fb_type`.
 #[repr(C)]
 #[derive(Clone, Debug)]
 pub struct FixScreeninfo {
