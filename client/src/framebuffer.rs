@@ -1,4 +1,8 @@
-// https://docs.rs/framebuffer/latest/src/framebuffer/lib.rs.html
+// References: https://docs.rs/framebuffer/latest/src/framebuffer/lib.rs.html
+
+use std::{fs::File, ops::Deref, slice};
+
+use anyhow::bail;
 
 pub const FBIOGET_VSCREENINFO: libc::c_ulong = 0x4600;
 pub const FBIOPUT_VSCREENINFO: libc::c_ulong = 0x4601;
@@ -68,4 +72,72 @@ pub struct FixScreeninfo {
     pub accel: u32,
     pub capabilities: u16,
     pub reserved: [u16; 2],
+}
+
+pub struct Framebuffer {
+    var_info: VarScreeninfo,
+    fix_info: FixScreeninfo,
+    buffer: *mut libc::c_void,
+}
+
+impl Framebuffer {
+    #[cfg(target_os = "linux")]
+    pub unsafe fn new() -> anyhow::Result<Self> {
+        let mut fb0 = File::open("/dev/fb0")?;
+
+        let mut fix_info = std::mem::zeroed::<FixScreeninfo>();
+
+        if libc::ioctl(
+            fb0.as_raw_fd(),
+            FBIOGET_FSCREENINFO.try_into()?,
+            &mut fix_info,
+        ) == -1
+        {
+            bail!("ioctl error: {:?}", io::Error::last_os_error());
+        }
+
+        let mut var_info = std::mem::zeroed::<VarScreeninfo>();
+
+        if libc::ioctl(
+            fb0.as_raw_fd(),
+            FBIOGET_VSCREENINFO.try_into()?,
+            &mut var_info,
+        ) == -1
+        {
+            bail!("ioctl error: {:?}", io::Error::last_os_error());
+        }
+
+        let buffer = libc::mmap(
+            ptr::null_mut(),
+            1872 * 2480,
+            libc::PROT_READ,
+            libc::MAP_SHARED,
+            fb0.as_raw_fd(),
+            0,
+        );
+
+        if buffer == libc::MAP_FAILED {
+            bail!("mmap error: {:?}", io::Error::last_os_error());
+        }
+
+        Self {
+            buffer,
+            var_info,
+            fix_info,
+        }
+    }
+}
+
+impl Deref for Framebuffer {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { slice::from_raw_parts(self.buffer as *const u8, 1872 * 2480) }
+    }
+}
+
+impl Drop for Framebuffer {
+    fn drop(&mut self) {
+        unsafe { libc::munmap(self.buffer, 1872 * 2480) };
+    }
 }
