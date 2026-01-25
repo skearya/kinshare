@@ -4,30 +4,31 @@ fn main() -> anyhow::Result<()> {
     let socket = UdpSocket::bind("0.0.0.0:9921")?;
     println!("Listening on {:#?}", socket.local_addr()?);
 
-    let mut buffer = vec![];
+    // let mut buffer = vec![];
     let mut msg = vec![0; 65535].into_boxed_slice();
 
     loop {
         let n = socket.recv(&mut msg)?;
+        dbg!(n);
 
-        buffer.extend_from_slice(&msg[..n]);
+        // buffer.extend_from_slice(&msg[..n]);
 
-        if buffer.len() >= 1872 * 2480 {
-            fs::write("raw/frame.raw", &buffer)?;
-            buffer.clear();
+        // if buffer.len() >= 1872 * 2480 {
+        //     fs::write("raw/frame.raw", &buffer)?;
+        //     buffer.clear();
 
-            Command::new("magick")
-                .args([
-                    "-size",
-                    "1872x2480",
-                    "-depth",
-                    "8",
-                    "gray:raw/frame.raw",
-                    "out/frame.png",
-                ])
-                .spawn()?;
+        //     Command::new("magick")
+        //         .args([
+        //             "-size",
+        //             "1872x2480",
+        //             "-depth",
+        //             "8",
+        //             "gray:raw/frame.raw",
+        //             "out/frame.png",
+        //         ])
+        //         .spawn()?;
 
-            println!("written frame!");
-        }
+        //     println!("written frame!");
+        // }
     }
 }

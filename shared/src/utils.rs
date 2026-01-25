@@ -9,4 +9,20 @@ macro_rules! time {
 
         result
     }};
+    ($e:literal, $b:block) => {{
+        let start = std::time::Instant::now();
+        let result = $b;
+        let duration = start.elapsed();
+
+        eprintln!(
+            "[{}:{}:{}] {} = {:#?}",
+            file!(),
+            line!(),
+            column!(),
+            $e,
+            duration
+        );
+
+        result
+    }};
 }

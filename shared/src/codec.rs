@@ -1,30 +1,22 @@
 use core::simd;
 use core::simd::prelude::*;
+use std::thread;
 
-pub fn encode(frame: &[u8], output: &mut Vec<u8>) {
-    let Some(mut color) = frame.first().copied() else {
-        return;
-    };
+pub fn encode_threaded<const THREADS: usize>(frame: &[u8], outputs: [&mut Vec<u8>; THREADS]) {
+    let amount = frame.len() / THREADS;
 
-    let mut count: u32 = 1;
-
-    for &c in &frame[1..] {
-        if c == color {
-            count += 1;
-        } else {
-            output.extend_from_slice(&count.to_be_bytes());
-            output.push(color);
-
-            color = c;
-            count = 1;
+    thread::scope(|s| {
+        for (n, output) in outputs.into_iter().enumerate() {
+            s.spawn(move || {
+                encode_simd(&frame[amount * n..amount * (n + 1)], output);
+            });
         }
-    }
-
-    output.extend_from_slice(&count.to_be_bytes());
-    output.push(color);
+    });
 }
 
-pub fn simdencode(frame: &[u8], output: &mut Vec<u8>) {
+pub fn encode_simd(frame: &[u8], output: &mut Vec<u8>) {
+    output.clear();
+
     let Some(mut color) = frame.first().copied() else {
         return;
     };
@@ -68,36 +60,16 @@ pub fn simdencode(frame: &[u8], output: &mut Vec<u8>) {
     output.push(color);
 }
 
-pub fn simdencodev0(frame: &[u8], output: &mut Vec<u8>) {
+pub fn encode(frame: &[u8], output: &mut Vec<u8>) {
+    output.clear();
+
     let Some(mut color) = frame.first().copied() else {
         return;
     };
 
     let mut count: u32 = 1;
-    let mut i = 1;
 
-    while i + 16 < frame.len() {
-        let data = simd::u8x16::from_slice(&frame[i..]);
-        let target = simd::u8x16::splat(color);
-        let first_ne = data.simd_ne(target).first_set();
-
-        match first_ne {
-            None => {
-                i += 16;
-                count += 16;
-            }
-            Some(at) => {
-                output.extend_from_slice(&(count + at as u32).to_be_bytes());
-                output.push(color);
-
-                i += at + 1;
-                color = frame[i - 1];
-                count = 1;
-            }
-        }
-    }
-
-    for &c in &frame[i..] {
+    for &c in &frame[1..] {
         if c == color {
             count += 1;
         } else {

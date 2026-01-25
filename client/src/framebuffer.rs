@@ -1,6 +1,6 @@
 // References: https://docs.rs/framebuffer/latest/src/framebuffer/lib.rs.html
 
-use std::{fs::File, ops::Deref, slice};
+use std::{fs::File, io, ops::Deref, os::fd::AsRawFd, ptr, slice};
 
 use anyhow::bail;
 
@@ -82,48 +82,50 @@ pub struct Framebuffer {
 
 impl Framebuffer {
     #[cfg(target_os = "linux")]
-    pub unsafe fn new() -> anyhow::Result<Self> {
+    pub fn new() -> anyhow::Result<Self> {
         let mut fb0 = File::open("/dev/fb0")?;
 
-        let mut fix_info = std::mem::zeroed::<FixScreeninfo>();
+        unsafe {
+            let mut fix_info = std::mem::zeroed::<FixScreeninfo>();
 
-        if libc::ioctl(
-            fb0.as_raw_fd(),
-            FBIOGET_FSCREENINFO.try_into()?,
-            &mut fix_info,
-        ) == -1
-        {
-            bail!("ioctl error: {:?}", io::Error::last_os_error());
-        }
+            if libc::ioctl(
+                fb0.as_raw_fd(),
+                FBIOGET_FSCREENINFO.try_into()?,
+                &mut fix_info,
+            ) == -1
+            {
+                bail!("ioctl error: {:?}", io::Error::last_os_error());
+            }
 
-        let mut var_info = std::mem::zeroed::<VarScreeninfo>();
+            let mut var_info = std::mem::zeroed::<VarScreeninfo>();
 
-        if libc::ioctl(
-            fb0.as_raw_fd(),
-            FBIOGET_VSCREENINFO.try_into()?,
-            &mut var_info,
-        ) == -1
-        {
-            bail!("ioctl error: {:?}", io::Error::last_os_error());
-        }
+            if libc::ioctl(
+                fb0.as_raw_fd(),
+                FBIOGET_VSCREENINFO.try_into()?,
+                &mut var_info,
+            ) == -1
+            {
+                bail!("ioctl error: {:?}", io::Error::last_os_error());
+            }
 
-        let buffer = libc::mmap(
-            ptr::null_mut(),
-            1872 * 2480,
-            libc::PROT_READ,
-            libc::MAP_SHARED,
-            fb0.as_raw_fd(),
-            0,
-        );
+            let buffer = libc::mmap(
+                ptr::null_mut(),
+                1872 * 2480,
+                libc::PROT_READ,
+                libc::MAP_SHARED,
+                fb0.as_raw_fd(),
+                0,
+            );
 
-        if buffer == libc::MAP_FAILED {
-            bail!("mmap error: {:?}", io::Error::last_os_error());
-        }
+            if buffer == libc::MAP_FAILED {
+                bail!("mmap error: {:?}", io::Error::last_os_error());
+            }
 
-        Self {
-            buffer,
-            var_info,
-            fix_info,
+            Ok(Self {
+                buffer,
+                var_info,
+                fix_info,
+            })
         }
     }
 }
