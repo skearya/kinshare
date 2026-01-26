@@ -1,6 +1,37 @@
 use core::simd;
 use core::simd::prelude::*;
-use std::thread;
+use std::fs::File;
+use std::os::fd::AsRawFd;
+use std::{io, thread};
+
+pub fn encode_threaded_with_read<const THREADS: usize>(
+    file: &File,
+    size: usize,
+    screens: [&mut Vec<u8>; THREADS],
+    outputs: [&mut Vec<u8>; THREADS],
+) {
+    let amount = size / THREADS;
+
+    thread::scope(|s| {
+        for (n, (screen, output)) in screens.into_iter().zip(outputs.into_iter()).enumerate() {
+            s.spawn(move || {
+                if unsafe {
+                    libc::pread(
+                        file.as_raw_fd(),
+                        screen.as_mut_ptr().cast(),
+                        amount,
+                        (amount * n).try_into().unwrap(),
+                    )
+                } == -1
+                {
+                    panic!("ioctl error: {:?}", io::Error::last_os_error());
+                }
+
+                encode(&screen, output);
+            });
+        }
+    });
+}
 
 pub fn encode_threaded_simd<const THREADS: usize>(frame: &[u8], outputs: [&mut Vec<u8>; THREADS]) {
     let amount = frame.len() / THREADS;

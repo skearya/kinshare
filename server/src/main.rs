@@ -9,8 +9,9 @@ fn main() -> anyhow::Result<()> {
     let mut set = 0;
     let mut size = None;
     let mut buffer = vec![0; 1872 * 2480];
-    let mut msg = [0; 65535];
     let mut decoded = Vec::with_capacity(1872 * 2480);
+
+    let mut msg = [0; 65535];
 
     loop {
         let n = socket.recv(&mut msg)?;
@@ -47,13 +48,12 @@ fn main() -> anyhow::Result<()> {
         // TODO: Maintain bitset of set values to avoid counting duplicate writes?
         set += length;
 
-        if let Some(size) = size
-            && set == size
-        {
-            codec::decode(&buffer[..size], &mut decoded);
+        if size.is_some_and(|size| set == size) {
+            println!("Processing {set}");
+
+            codec::decode(&buffer[..set], &mut decoded);
 
             fs::write("raw/frame.raw", &decoded)?;
-            decoded.clear();
 
             Command::new("magick")
                 .args([
@@ -66,8 +66,13 @@ fn main() -> anyhow::Result<()> {
                 ])
                 .spawn()?;
 
+            set = 0;
+            size = None;
+
             buffer.clear();
             buffer.resize(buffer.capacity(), 0);
+
+            decoded.clear();
         }
     }
 }

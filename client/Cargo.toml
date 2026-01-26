@@ -5,5 +5,5 @@ edition = "2024"
 
 [dependencies]
 shared = { path = "../shared" }
+libc = { workspace = true }
 anyhow = { workspace = true }
-libc = "0.2"
