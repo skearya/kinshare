@@ -11,9 +11,7 @@ fn main() -> anyhow::Result<()> {
 
     for _ in 0..RUNS {
         let start = std::time::Instant::now();
-
         shared::codec::encode(&frame, &mut output);
-
         sum0 += start.elapsed().as_nanos();
 
         output.clear();
@@ -23,9 +21,7 @@ fn main() -> anyhow::Result<()> {
 
     for _ in 0..RUNS {
         let start = std::time::Instant::now();
-
         shared::codec::encode_simd(&frame, &mut output);
-
         sum1 += start.elapsed().as_nanos();
 
         output.clear();
