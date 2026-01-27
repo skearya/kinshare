@@ -1,12 +1,25 @@
 use std::{iter, sync::Arc};
 
+use wgpu::util::DeviceExt;
 use winit::{
     application::ApplicationHandler,
+    dpi::PhysicalSize,
     event::{ElementState, KeyEvent, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowId},
 };
+
+const FRAME_BYTES: &[u8] = include_bytes!("../../raw/frame2.raw");
+const FRAME_DIMENSIONS: (u32, u32) = (1872, 2480);
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct StandardUniform {
+    inner_size: [f32; 2],
+    scale_factor: f32,
+    _padding: u32,
+}
 
 pub struct State {
     surface: wgpu::Surface<'static>,
@@ -15,12 +28,17 @@ pub struct State {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     render_pipeline: wgpu::RenderPipeline,
+    screen_bind_group: wgpu::BindGroup,
+    standard_uniform: StandardUniform,
+    standard_uniform_buffer: wgpu::Buffer,
+    standard_bind_group: wgpu::BindGroup,
     window: Arc<Window>,
 }
 
 impl State {
     pub async fn new(window: Arc<Window>) -> anyhow::Result<Self> {
-        let size = window.inner_size();
+        let inner_size = window.inner_size();
+        let scale_factor = window.scale_factor();
 
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::PRIMARY,
@@ -60,20 +78,141 @@ impl State {
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
-            width: size.width,
-            height: size.height,
+            width: inner_size.width,
+            height: inner_size.height,
             present_mode: surface_caps.present_modes[0],
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
 
+        let screen_size = wgpu::Extent3d {
+            width: FRAME_DIMENSIONS.0,
+            height: FRAME_DIMENSIONS.1,
+            depth_or_array_layers: 1,
+        };
+
+        let screen_texture = device.create_texture(&wgpu::TextureDescriptor {
+            size: screen_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            label: Some("screen_texture"),
+            view_formats: &[],
+        });
+
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &screen_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            FRAME_BYTES,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(FRAME_DIMENSIONS.0),
+                rows_per_image: Some(FRAME_DIMENSIONS.1),
+            },
+            screen_size,
+        );
+
+        let screen_texture_view =
+            screen_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let screen_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let screen_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+                label: Some("screen_bind_group_layout"),
+            });
+
+        let screen_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &screen_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&screen_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&screen_sampler),
+                },
+            ],
+            label: Some("screen_bind_group"),
+        });
+
+        let standard_uniform = StandardUniform {
+            inner_size: [inner_size.width as f32, inner_size.height as f32],
+            scale_factor: scale_factor as f32,
+            _padding: 0,
+        };
+
+        let standard_uniform_buffer =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Standard Buffer"),
+                contents: bytemuck::cast_slice(&[standard_uniform]),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+
+        let standard_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+                label: Some("standard_bind_group_layout"),
+            });
+
+        let standard_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &standard_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: standard_uniform_buffer.as_entire_binding(),
+            }],
+            label: Some("standard_bind_group"),
+        });
+
         let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
 
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Render Pipeline Layout"),
-                bind_group_layouts: &[],
+                bind_group_layouts: &[&screen_bind_group_layout, &standard_bind_group_layout],
                 immediate_size: 0,
             });
 
@@ -122,16 +261,29 @@ impl State {
             queue,
             config,
             render_pipeline,
+            screen_bind_group,
+            standard_uniform,
+            standard_uniform_buffer,
+            standard_bind_group,
             window,
         })
     }
 
-    pub fn resize(&mut self, width: u32, height: u32) {
+    pub fn resize(&mut self, PhysicalSize { width, height }: PhysicalSize<u32>) {
         if width > 0 && height > 0 {
             self.config.width = width;
             self.config.height = height;
+
+            self.standard_uniform.inner_size = [width as f32, height as f32];
+
             self.surface.configure(&self.device, &self.config);
             self.is_surface_configured = true;
+
+            self.queue.write_buffer(
+                &self.standard_uniform_buffer,
+                0,
+                bytemuck::cast_slice(&[self.standard_uniform]),
+            );
         }
     }
 
@@ -195,7 +347,9 @@ impl State {
         });
 
         render_pass.set_pipeline(&self.render_pipeline);
-        render_pass.draw(0..6, 0..1);
+        render_pass.set_bind_group(0, &self.screen_bind_group, &[]);
+        render_pass.set_bind_group(1, &self.standard_bind_group, &[]);
+        render_pass.draw(0..3, 0..1);
 
         drop(render_pass);
 
@@ -238,14 +392,13 @@ impl ApplicationHandler<State> for App {
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(size) => state.resize(size.width, size.height),
+            WindowEvent::Resized(size) => state.resize(size),
             WindowEvent::RedrawRequested => {
                 state.update();
 
                 if let Err(e) = state.render() {
                     if let wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated = e {
-                        let size = state.window.inner_size();
-                        state.resize(size.width, size.height);
+                        state.resize(state.window.inner_size());
                     } else {
                         log::error!("Unable to render {}", e);
                     }

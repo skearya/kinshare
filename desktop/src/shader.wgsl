@@ -1,5 +1,5 @@
 struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
+    @builtin(position) clip_position: vec4<f32>,
     @location(0) uv: vec2<f32>,
 };
 
@@ -11,14 +11,39 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
         vec2<f32>(3.0, -1.0)
     );
 
-    var out: VertexOutput;
-    out.position = vec4(positions[vertex_index].xy, 0.0, 1.0);
-    out.uv = positions[vertex_index].xy;
-    return out;
+    let position = positions[vertex_index];
+
+    return VertexOutput(vec4(position.xy, 0.0, 1.0), position.xy);
 }
 
+@group(0) @binding(0)
+var screen_texture: texture_2d<f32>;
+@group(0) @binding(1)
+var screen_sampler: sampler;
+
+struct StandardUniform {
+    inner_size: vec2<f32>,
+    scale_factor: f32,
+    _padding: u32,
+};
+
+@group(1) @binding(0)
+var<uniform> standard: StandardUniform;
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(in.uv.xy, 0.0, 1.0);
+    let screen_aspect_ratio = 1872.0 / 2480.0;
+    let display_aspect_ratio = standard.inner_size.x / standard.inner_size.y;
+
+    var uv = vec2(in.clip_position.x / standard.inner_size.x, in.clip_position.y / standard.inner_size.y) - 0.5;
+
+    if (screen_aspect_ratio < display_aspect_ratio) {
+        uv.x /= screen_aspect_ratio / display_aspect_ratio;
+    } else {
+        uv.y /= display_aspect_ratio / screen_aspect_ratio;
+    }
+
+    uv += 0.5;
+
+    return vec4<f32>(textureSample(screen_texture, screen_sampler, uv).xxx, 1.0);
 }
