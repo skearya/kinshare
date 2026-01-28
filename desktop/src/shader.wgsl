@@ -45,5 +45,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     uv += 0.5;
 
-    return vec4<f32>(textureSample(screen_texture, screen_sampler, uv).xxx, 1.0);
+    if uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0 {
+        return vec4<f32>(textureSample(screen_texture, screen_sampler, uv).xxx, 1.0);
+    }
+
+    let dist = distance(uv, vec2(0.5));
+
+    return vec4<f32>(dist, dist, dist, 1.0);
 }
