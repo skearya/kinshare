@@ -133,6 +133,8 @@ pub fn decode_unstitched<const N: usize>(inputs: [&[u8]; N], output: &mut Vec<u8
 }
 
 pub fn decode(frame: &[u8], output: &mut Vec<u8>) {
+    output.clear();
+
     let (encodings, []) = frame.as_chunks::<5>() else {
         return;
     };
