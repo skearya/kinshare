@@ -137,7 +137,7 @@ fn main() -> anyhow::Result<()> {
 
         frame += 1;
 
-        thread::sleep(Duration::from_millis(1000));
+        thread::sleep(Duration::from_millis(12));
     }
 
     Ok(())

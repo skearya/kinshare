@@ -445,7 +445,7 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn exiting(&mut self, event_loop: &ActiveEventLoop) {
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         // TODO: Kill server thread
     }
 }
