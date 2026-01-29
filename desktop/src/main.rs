@@ -1,5 +1,13 @@
-use std::{iter, sync::Arc};
+use std::{
+    iter,
+    sync::{
+        Arc, Mutex,
+        atomic::{self, AtomicBool},
+    },
+    thread,
+};
 
+use server::Server;
 use wgpu::util::DeviceExt;
 use winit::{
     application::ApplicationHandler,
@@ -10,7 +18,6 @@ use winit::{
     window::{Window, WindowId},
 };
 
-const FRAME_BYTES: &[u8] = include_bytes!("../../raw/frame2.raw");
 const FRAME_DIMENSIONS: (u32, u32) = (1872, 2480);
 
 #[repr(C)]
@@ -24,19 +31,31 @@ struct StandardUniform {
 pub struct State {
     surface: wgpu::Surface<'static>,
     is_surface_configured: bool,
+
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     render_pipeline: wgpu::RenderPipeline,
+
+    screen_buffer: Arc<Mutex<Vec<u8>>>,
+    screen_changed: Arc<AtomicBool>,
+    screen_size: wgpu::Extent3d,
+    screen_texture: wgpu::Texture,
     screen_bind_group: wgpu::BindGroup,
+
     standard_uniform: StandardUniform,
     standard_uniform_buffer: wgpu::Buffer,
     standard_bind_group: wgpu::BindGroup,
+
     window: Arc<Window>,
 }
 
 impl State {
-    pub async fn new(window: Arc<Window>) -> anyhow::Result<Self> {
+    pub async fn new(
+        window: Arc<Window>,
+        screen_buffer: Arc<Mutex<Vec<u8>>>,
+        screen_changed: Arc<AtomicBool>,
+    ) -> anyhow::Result<Self> {
         let inner_size = window.inner_size();
         let scale_factor = window.scale_factor();
 
@@ -102,22 +121,6 @@ impl State {
             label: Some("screen_texture"),
             view_formats: &[],
         });
-
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &screen_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            FRAME_BYTES,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(FRAME_DIMENSIONS.0),
-                rows_per_image: Some(FRAME_DIMENSIONS.1),
-            },
-            screen_size,
-        );
 
         let screen_texture_view =
             screen_texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -257,14 +260,22 @@ impl State {
         Ok(Self {
             surface,
             is_surface_configured: false,
+
             device,
             queue,
             config,
             render_pipeline,
+
+            screen_buffer,
+            screen_changed,
+            screen_size,
+            screen_texture,
             screen_bind_group,
+
             standard_uniform,
             standard_uniform_buffer,
             standard_bind_group,
+
             window,
         })
     }
@@ -287,7 +298,7 @@ impl State {
         }
     }
 
-    fn handle_key(&self, event_loop: &ActiveEventLoop, event: KeyEvent) {
+    fn key(&self, event_loop: &ActiveEventLoop, event: KeyEvent) {
         let PhysicalKey::Code(code) = event.physical_key else {
             return;
         };
@@ -323,6 +334,26 @@ impl State {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Render Encoder"),
             });
+
+        if self.screen_changed.swap(false, atomic::Ordering::SeqCst) {
+            let buffer = self.screen_buffer.lock().unwrap();
+
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.screen_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &buffer,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(FRAME_DIMENSIONS.0),
+                    rows_per_image: Some(FRAME_DIMENSIONS.1),
+                },
+                self.screen_size,
+            );
+        }
 
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Render Pass"),
@@ -370,16 +401,21 @@ impl App {
     }
 }
 
-impl ApplicationHandler<State> for App {
+impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let window_attrs = Window::default_attributes();
-        let window = Arc::new(event_loop.create_window(window_attrs).unwrap());
+        let window = event_loop.create_window(window_attrs).unwrap();
 
-        self.state = Some(pollster::block_on(State::new(window)).unwrap());
-    }
+        let server = Server::new();
+        let screen_buffer = server.front();
+        let screen_changed = server.changed();
 
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: State) {
-        self.state = Some(event);
+        thread::spawn(|| server.run().expect("server crashed"));
+
+        self.state = Some(
+            pollster::block_on(State::new(Arc::new(window), screen_buffer, screen_changed))
+                .unwrap(),
+        );
     }
 
     fn window_event(
@@ -392,7 +428,6 @@ impl ApplicationHandler<State> for App {
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(size) => state.resize(size),
             WindowEvent::RedrawRequested => {
                 state.update();
 
@@ -404,16 +439,21 @@ impl ApplicationHandler<State> for App {
                     }
                 }
             }
-            WindowEvent::KeyboardInput { event, .. } => state.handle_key(event_loop, event),
+            WindowEvent::Resized(size) => state.resize(size),
+            WindowEvent::KeyboardInput { event, .. } => state.key(event_loop, event),
             _ => {}
         }
+    }
+
+    fn exiting(&mut self, event_loop: &ActiveEventLoop) {
+        // TODO: Kill server thread
     }
 }
 
 pub fn run() -> anyhow::Result<()> {
     env_logger::init();
 
-    let event_loop = EventLoop::with_user_event().build()?;
+    let event_loop = EventLoop::new()?;
     let mut app = App::new();
 
     event_loop.run_app(&mut app)?;

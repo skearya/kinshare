@@ -24,7 +24,7 @@ const THREADS: usize = 2;
 #[cfg(target_os = "linux")]
 fn main() -> anyhow::Result<()> {
     let socket = UdpSocket::bind("0.0.0.0:0")?;
-    socket.connect("10.0.0.28:9921")?;
+    socket.connect("192.168.15.245:9921")?;
 
     let mut fb0 = File::open("/dev/fb0")?;
 

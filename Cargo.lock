@@ -440,6 +440,7 @@ dependencies = [
  "env_logger",
  "log",
  "pollster",
+ "server",
  "wgpu",
  "winit",
 ]

@@ -4,10 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+server = { path = "../server" }
 anyhow = { workspace = true }
 winit = { version = "0.30" }
 env_logger = "0.11"
 log = "0.4"
 wgpu = "28.0"
 pollster = "0.4"
-bytemuck = { version = "1.24", features = [ "derive" ] }
+bytemuck = { version = "1.24", features = ["derive"] }
