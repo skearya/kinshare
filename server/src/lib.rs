@@ -1,39 +1,48 @@
 use std::{
-    collections::HashSet,
-    mem,
+    array, mem,
     net::UdpSocket,
-    ops,
     sync::{
         Arc, Mutex,
         atomic::{self, AtomicBool},
     },
 };
 
-use shared::{codec, messages::Header};
+use shared::{
+    codec,
+    consts::{
+        CHUNK_HEIGHT, CHUNK_SIZE, CHUNK_WIDTH, DISPLAY_HEIGHT, DISPLAY_SIZE, DISPLAY_WIDTH,
+        NUM_CHUNKS,
+    },
+    messages::Header,
+};
+
+#[derive(Clone)]
+struct Chunk {
+    frame: u32,
+    recieved: u32,
+    encoded: Vec<u8>,
+}
 
 pub struct Server {
-    frame: usize,
-    size: usize,
+    chunks: [Chunk; NUM_CHUNKS],
+    decoded: Vec<u8>,
 
-    set: usize,
-    placed: HashSet<ops::Range<usize>>,
-    staging: Vec<u8>,
-
-    front: Arc<Mutex<Vec<u8>>>,
     back: Vec<u8>,
+    front: Arc<Mutex<Vec<u8>>>,
     changed: Arc<AtomicBool>,
 }
 
 impl Server {
     pub fn new() -> Self {
         Self {
-            frame: 0,
-            size: 0,
-            set: 0,
-            placed: HashSet::new(),
-            staging: Vec::with_capacity(1872 * 2480),
-            front: Arc::new(Mutex::new(Vec::with_capacity(1872 * 2480))),
-            back: Vec::with_capacity(1872 * 2480),
+            chunks: array::repeat(Chunk {
+                frame: 0,
+                recieved: 0,
+                encoded: vec![0; lz4_flex::block::get_maximum_output_size(CHUNK_SIZE)],
+            }),
+            decoded: vec![0; CHUNK_SIZE],
+            back: vec![0; DISPLAY_SIZE],
+            front: Arc::new(Mutex::new(vec![0; DISPLAY_SIZE])),
             changed: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -53,73 +62,69 @@ impl Server {
             }
 
             let (frame, rest) = msg.split_at(size_of::<u32>());
-            let (size, rest) = rest.split_at(size_of::<u32>());
             let (offset, rest) = rest.split_at(size_of::<u32>());
-            let (length, data) = rest.split_at(size_of::<u16>());
+            let (total, rest) = rest.split_at(size_of::<u32>());
+            let (x, rest) = rest.split_at(size_of::<u8>());
+            let (y, rest) = rest.split_at(size_of::<u8>());
 
-            let frame = u32::from_be_bytes(frame.try_into()?) as usize;
-            let size = u32::from_be_bytes(size.try_into()?) as usize;
-            let offset = u32::from_be_bytes(offset.try_into()?) as usize;
-            let length = u16::from_be_bytes(length.try_into()?) as usize;
+            let frame = u32::from_be_bytes(frame.try_into()?);
+            let offset = u32::from_be_bytes(offset.try_into()?);
+            let total = u32::from_be_bytes(total.try_into()?);
+            let x = u8::from_be_bytes(x.try_into()?);
+            let y = u8::from_be_bytes(y.try_into()?);
 
-            if length != data.len() {
-                continue;
-            }
-
-            if offset + length > size {
-                continue;
-            }
-
-            self.message(frame, size, offset, length, data)?;
+            self.message(frame, offset, total, x, y, rest)?;
         }
     }
 
     fn message(
         &mut self,
-        frame: usize,
-        size: usize,
-        offset: usize,
-        length: usize,
+        frame: u32,
+        offset: u32,
+        total: u32,
+        x: u8,
+        y: u8,
         data: &[u8],
     ) -> anyhow::Result<()> {
-        if frame < self.frame {
-            return Ok(());
-        } else if frame > self.frame {
-            println!("{}, {}, {}, {}", frame, self.frame, self.set, self.size);
-            self.clear();
-
-            self.frame = frame;
-            self.size = size;
-            self.staging.resize(size, 0);
-        }
-
-        if !self.placed.insert(offset..offset + length) {
+        if !(0..(DISPLAY_WIDTH / CHUNK_WIDTH) as u8).contains(&x) {
             return Ok(());
         }
 
-        self.set += length;
-        self.staging[offset..offset + length].copy_from_slice(data);
+        if !(0..(DISPLAY_HEIGHT / CHUNK_HEIGHT) as u8).contains(&y) {
+            return Ok(());
+        }
 
-        if self.set == self.size {
-            codec::decode(&self.staging[..self.size], &mut self.back);
+        let chunk = &mut self.chunks[y as usize * (DISPLAY_WIDTH / CHUNK_WIDTH) + x as usize];
 
+        if frame < chunk.frame {
+            return Ok(());
+        } else if frame > chunk.frame {
+            chunk.frame = frame;
+            chunk.recieved = 0;
+        }
+
+        chunk.encoded[offset as usize..offset as usize + data.len()].copy_from_slice(data);
+        chunk.recieved += data.len() as u32;
+
+        if chunk.recieved == total {
             {
                 let mut front = self.front.lock().unwrap();
-                mem::swap(&mut self.back, &mut front);
+
+                codec::decode(
+                    &mut front,
+                    &mut self.decoded,
+                    x,
+                    y,
+                    &chunk.encoded[..total as usize],
+                );
             }
 
             self.changed.store(true, atomic::Ordering::SeqCst);
-
-            self.clear();
+        } else {
+            println!("{} / {}", chunk.recieved, total);
         }
 
         Ok(())
-    }
-
-    fn clear(&mut self) {
-        self.set = 0;
-        self.staging.clear();
-        self.placed.clear();
     }
 
     pub fn front(&self) -> Arc<Mutex<Vec<u8>>> {

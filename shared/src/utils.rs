@@ -30,7 +30,7 @@ macro_rules! time {
 #[macro_export]
 macro_rules! quickbench {
     ($n:literal, $name:literal, $run:block, $cleanup:block) => {{
-        let sum = iter::repeat_with(|| {
+        let sum = std::iter::repeat_with(|| {
             let start = std::time::Instant::now();
             $run;
             let elapsed = start.elapsed().as_nanos();

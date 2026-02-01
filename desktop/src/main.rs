@@ -8,6 +8,7 @@ use std::{
 };
 
 use server::Server;
+use shared::consts::{DISPLAY_HEIGHT, DISPLAY_WIDTH};
 use wgpu::util::DeviceExt;
 use winit::{
     application::ApplicationHandler,
@@ -17,8 +18,6 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowId},
 };
-
-const FRAME_DIMENSIONS: (u32, u32) = (1872, 2480);
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -106,8 +105,8 @@ impl State {
         };
 
         let screen_size = wgpu::Extent3d {
-            width: FRAME_DIMENSIONS.0,
-            height: FRAME_DIMENSIONS.1,
+            width: DISPLAY_WIDTH as u32,
+            height: DISPLAY_HEIGHT as u32,
             depth_or_array_layers: 1,
         };
 
@@ -348,8 +347,8 @@ impl State {
                 &buffer,
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(FRAME_DIMENSIONS.0),
-                    rows_per_image: Some(FRAME_DIMENSIONS.1),
+                    bytes_per_row: Some(DISPLAY_WIDTH as u32),
+                    rows_per_image: Some(DISPLAY_HEIGHT as u32),
                 },
                 self.screen_size,
             );

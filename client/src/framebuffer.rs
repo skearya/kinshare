@@ -83,7 +83,7 @@ pub struct Framebuffer {
 impl Framebuffer {
     #[cfg(target_os = "linux")]
     pub fn new() -> anyhow::Result<Self> {
-        let mut fb0 = File::open("/dev/fb0")?;
+        let fb0 = File::open("/dev/fb0")?;
 
         unsafe {
             let mut fix_info = std::mem::zeroed::<FixScreeninfo>();

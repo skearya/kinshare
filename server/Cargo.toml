@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 shared = { path = "../shared" }
 anyhow = { workspace = true }
+lz4_flex = { workspace = true }

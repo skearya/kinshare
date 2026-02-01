@@ -5,3 +5,5 @@ members = ["client", "desktop", "server", "shared"]
 [workspace.dependencies]
 libc = "0.2"
 anyhow = "1.0"
+rustc-hash = "2.1"
+lz4_flex = { version = "0.12", default-features = false }

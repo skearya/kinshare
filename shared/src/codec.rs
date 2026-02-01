@@ -1,153 +1,121 @@
-use core::simd;
-use core::simd::prelude::*;
-use std::fs::File;
-use std::os::fd::AsRawFd;
+use std::hash::Hasher;
 use std::{io, thread};
 
-pub fn encode_threaded_with_read<const THREADS: usize>(
-    file: &File,
-    size: usize,
-    screens: [&mut Vec<u8>; THREADS],
-    outputs: [&mut Vec<u8>; THREADS],
-) {
-    let amount = size / THREADS;
+use rustc_hash::FxHasher;
+
+use crate::consts::{
+    CHUNK_HEIGHT, CHUNK_SIZE, CHUNK_WIDTH, DISPLAY_SIZE, DISPLAY_WIDTH, NUM_CHUNKS, THREADS,
+};
+
+#[derive(Clone)]
+pub struct Chunk {
+    pub x: u8,
+    pub y: u8,
+    pub hash: u64,
+    pub size: usize,
+    pub encoded: Vec<u8>,
+}
+
+impl Chunk {
+    pub fn new(x: u8, y: u8) -> Self {
+        Self {
+            x,
+            y,
+            hash: 0,
+            size: 0,
+            encoded: vec![0; lz4_flex::block::get_maximum_output_size(CHUNK_SIZE)],
+        }
+    }
+
+    pub fn encode(&mut self, framebuffer: &[u8], offset: usize, buffer: &mut [u8]) -> bool {
+        let frame_top_left_x = self.x as usize * CHUNK_WIDTH;
+        let frame_top_left_y = self.y as usize * CHUNK_HEIGHT;
+
+        let mut hasher = FxHasher::default();
+
+        for row in 0..CHUNK_HEIGHT {
+            let frame_start =
+                (frame_top_left_x + (frame_top_left_y + row) * DISPLAY_WIDTH) - offset;
+
+            hasher.write(&framebuffer[frame_start..frame_start + CHUNK_WIDTH]);
+        }
+
+        let hash = hasher.finish();
+
+        if self.hash == hash {
+            return false;
+        }
+
+        self.hash = hash;
+
+        for row in 0..CHUNK_HEIGHT {
+            let frame_start =
+                (frame_top_left_x + (frame_top_left_y + row) * DISPLAY_WIDTH) - offset;
+            let buffer_start = row * CHUNK_WIDTH;
+
+            buffer[buffer_start..buffer_start + CHUNK_WIDTH]
+                .copy_from_slice(&framebuffer[frame_start..frame_start + CHUNK_WIDTH]);
+        }
+
+        self.size = lz4_flex::block::compress_into(buffer, &mut self.encoded)
+            .expect("compression shouldn't fail");
+
+        true
+    }
+
+    pub fn decode(framebuffer: &mut [u8], buffer: &[u8], x: u8, y: u8) {
+        let frame_top_left_x = x as usize * CHUNK_WIDTH;
+        let frame_top_left_y = y as usize * CHUNK_HEIGHT;
+
+        for row in 0..CHUNK_HEIGHT {
+            let frame_start = frame_top_left_x + (frame_top_left_y + row) * DISPLAY_WIDTH;
+            let buffer_start = row * CHUNK_WIDTH;
+
+            framebuffer[frame_start..frame_start + CHUNK_WIDTH]
+                .copy_from_slice(&buffer[buffer_start..buffer_start + CHUNK_WIDTH]);
+        }
+    }
+}
+
+pub fn encode(file: i32, framebuffer: &mut [u8], chunks: &mut [Chunk]) -> [bool; NUM_CHUNKS] {
+    let mut updated = [false; NUM_CHUNKS];
 
     thread::scope(|s| {
-        for (n, (screen, output)) in screens.into_iter().zip(outputs.into_iter()).enumerate() {
+        for (n, ((framebuffer, chunks), updated)) in framebuffer
+            .chunks_exact_mut(DISPLAY_SIZE / THREADS)
+            .zip(chunks.chunks_exact_mut(NUM_CHUNKS / THREADS))
+            .zip(updated.chunks_exact_mut(NUM_CHUNKS / THREADS))
+            .enumerate()
+        {
             s.spawn(move || {
+                let offset = n * (DISPLAY_SIZE / THREADS);
+
                 if unsafe {
                     libc::pread(
-                        file.as_raw_fd(),
-                        screen.as_mut_ptr().cast(),
-                        amount,
-                        (amount * n).try_into().unwrap(),
+                        file,
+                        framebuffer.as_mut_ptr().cast(),
+                        DISPLAY_SIZE / THREADS,
+                        offset as i64,
                     )
                 } == -1
                 {
-                    panic!("ioctl error: {:?}", io::Error::last_os_error());
+                    panic!("pread error: {:?}", io::Error::last_os_error());
                 }
 
-                encode(&screen, output);
+                let mut buffer = [0; CHUNK_SIZE];
+
+                for (chunk, updated) in chunks.into_iter().zip(updated.into_iter()) {
+                    *updated = chunk.encode(framebuffer, offset, &mut buffer);
+                }
             });
         }
     });
+
+    updated
 }
 
-pub fn encode_threaded_simd<const THREADS: usize>(frame: &[u8], outputs: [&mut Vec<u8>; THREADS]) {
-    let amount = frame.len() / THREADS;
+pub fn decode(framebuffer: &mut [u8], decoded: &mut [u8], x: u8, y: u8, data: &[u8]) {
+    lz4_flex::block::decompress_into(data, decoded).expect("decompression shouldn't fail");
 
-    thread::scope(|s| {
-        for (n, output) in outputs.into_iter().enumerate() {
-            s.spawn(move || {
-                encode_simd(&frame[amount * n..amount * (n + 1)], output);
-            });
-        }
-    });
-}
-
-pub fn encode_threaded<const THREADS: usize>(frame: &[u8], outputs: [&mut Vec<u8>; THREADS]) {
-    let amount = frame.len() / THREADS;
-
-    thread::scope(|s| {
-        for (n, output) in outputs.into_iter().enumerate() {
-            s.spawn(move || {
-                encode(&frame[amount * n..amount * (n + 1)], output);
-            });
-        }
-    });
-}
-
-pub fn encode_simd(frame: &[u8], output: &mut Vec<u8>) {
-    output.clear();
-
-    let Some(mut color) = frame.first().copied() else {
-        return;
-    };
-
-    let mut count: u32 = 1;
-    let mut i = 1;
-
-    while i + 16 < frame.len() {
-        let data = simd::u8x16::from_slice(&frame[i..]);
-        let target = simd::u8x16::splat(color);
-        let mask = data.simd_ne(target).first_set();
-
-        if let Some(at) = mask {
-            output.extend_from_slice(&(count + at as u32).to_be_bytes());
-            output.push(color);
-
-            i += at;
-            color = frame[i];
-            count = 0;
-        } else {
-            i += 16;
-            count += 16;
-        }
-    }
-
-    for &c in &frame[i..] {
-        if c == color {
-            count += 1;
-        } else {
-            output.extend_from_slice(&count.to_be_bytes());
-            output.push(color);
-
-            color = c;
-            count = 1;
-        }
-    }
-
-    output.extend_from_slice(&count.to_be_bytes());
-    output.push(color);
-}
-
-pub fn encode(frame: &[u8], output: &mut Vec<u8>) {
-    output.clear();
-
-    let Some(mut color) = frame.first().copied() else {
-        return;
-    };
-
-    let mut count: u32 = 1;
-
-    for &c in &frame[1..] {
-        if c == color {
-            count += 1;
-        } else {
-            output.extend_from_slice(&count.to_be_bytes());
-            output.push(color);
-
-            color = c;
-            count = 1;
-        }
-    }
-
-    output.extend_from_slice(&count.to_be_bytes());
-    output.push(color);
-}
-
-pub fn decode_unstitched<const N: usize>(inputs: [&[u8]; N], output: &mut Vec<u8>) {
-    for frame in inputs {
-        decode(frame, output);
-    }
-}
-
-pub fn decode(frame: &[u8], output: &mut Vec<u8>) {
-    output.clear();
-
-    let (encodings, []) = frame.as_chunks::<5>() else {
-        return;
-    };
-
-    let encodings = encodings
-        .iter()
-        .map(|&[count0, count1, count2, count3, color]| {
-            (u32::from_be_bytes([count0, count1, count2, count3]), color)
-        });
-
-    for (count, color) in encodings {
-        for _ in 0..count {
-            output.push(color);
-        }
-    }
+    Chunk::decode(framebuffer, decoded, x, y);
 }

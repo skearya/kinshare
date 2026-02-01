@@ -5,7 +5,7 @@ BIN := "client"
 default: build copy run
 
 build:
-    RUSTFLAGS="-C target-feature=+crt-static -C opt-level=3 -C strip=symbols -C target-feature=+v7,+neon" cross build --target arm-unknown-linux-musleabi --bin {{BIN}} --release
+    RUSTFLAGS="-C target-feature=+crt-static -C opt-level=3 -C strip=symbols -C target-feature=+v7,+neon,+aes" cross build --target arm-unknown-linux-musleabi --bin {{BIN}} --release
 
 copy:
     SSHPASS=$SSHPASS sshpass -e scp target/arm-unknown-linux-musleabi/release/{{BIN}} $HOST:/mnt/us/dev/{{BIN}}

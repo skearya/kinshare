@@ -7,3 +7,5 @@ edition = "2024"
 shared = { path = "../shared" }
 libc = { workspace = true }
 anyhow = { workspace = true }
+rustc-hash = { workspace = true }
+lz4_flex = { workspace = true }
