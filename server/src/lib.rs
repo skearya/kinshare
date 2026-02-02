@@ -27,7 +27,6 @@ pub struct Server {
     chunks: [Chunk; NUM_CHUNKS],
     decoded: Vec<u8>,
 
-    back: Vec<u8>,
     front: Arc<Mutex<Vec<u8>>>,
     changed: Arc<AtomicBool>,
 }
@@ -41,7 +40,6 @@ impl Server {
                 encoded: vec![0; lz4_flex::block::get_maximum_output_size(CHUNK_SIZE)],
             }),
             decoded: vec![0; CHUNK_SIZE],
-            back: vec![0; DISPLAY_SIZE],
             front: Arc::new(Mutex::new(vec![0; DISPLAY_SIZE])),
             changed: Arc::new(AtomicBool::new(false)),
         }
@@ -120,8 +118,6 @@ impl Server {
             }
 
             self.changed.store(true, atomic::Ordering::SeqCst);
-        } else {
-            println!("{} / {}", chunk.recieved, total);
         }
 
         Ok(())
