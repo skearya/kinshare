@@ -1,6 +1,5 @@
 use std::{
-    array, mem,
-    net::UdpSocket,
+    array, net::UdpSocket,
     sync::{
         Arc, Mutex,
         atomic::{self, AtomicBool},

@@ -46,6 +46,7 @@ fn main() -> anyhow::Result<()> {
 
     loop {
         let changed = codec::encode(fb0.as_raw_fd(), &mut framebuffer, &mut chunks);
+
         let count = changed
             .iter()
             .map(|&change| if change { 1 } else { 0 })
@@ -144,4 +145,43 @@ fn main() -> anyhow::Result<()> {
 #[cfg(not(target_os = "linux"))]
 fn main() {
     panic!("not running on a kindle?")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codec() -> anyhow::Result<()> {
+        let fb0 = File::open("raw/frame.raw")?;
+
+        let mut framebuffer = vec![0; DISPLAY_SIZE];
+        let mut chunks: [Chunk; NUM_CHUNKS] = array::from_fn(|i| Chunk {
+            x: (i % (DISPLAY_WIDTH / CHUNK_WIDTH)) as u8,
+            y: (i / (DISPLAY_HEIGHT / CHUNK_HEIGHT)) as u8,
+            encoded: vec![0; lz4_flex::block::get_maximum_output_size(CHUNK_SIZE)],
+            hash: 0,
+            size: 0,
+        });
+
+        let changed = codec::encode(fb0.as_raw_fd(), &mut framebuffer, &mut chunks);
+        assert_eq!(changed, [true; 64]);
+
+        let mut framebuffer2 = vec![0; DISPLAY_SIZE];
+        let mut decoded = vec![0; lz4_flex::block::get_maximum_output_size(CHUNK_SIZE)];
+
+        for chunk in &mut chunks {
+            codec::decode(
+                &mut framebuffer2,
+                &mut decoded,
+                chunk.x,
+                chunk.y,
+                &chunk.encoded[..chunk.size],
+            );
+        }
+
+        assert!(framebuffer == framebuffer2);
+
+        Ok(())
+    }
 }
