@@ -1,9 +1,9 @@
 use std::{
-    array, net::UdpSocket,
-    sync::{
-        Arc, Mutex,
-        atomic::{self, AtomicBool},
-    },
+    array,
+    net::UdpSocket,
+    ops::Range,
+    sync::{Arc, Mutex, mpsc},
+    thread,
 };
 
 use shared::{
@@ -17,34 +17,44 @@ use shared::{
 
 #[derive(Clone)]
 struct Chunk {
-    frame: u32,
     recieved: u32,
     encoded: Vec<u8>,
 }
 
 pub struct Server {
+    frame: u32,
+
     chunks: [Chunk; NUM_CHUNKS],
     decoded: Vec<u8>,
+    changed: Vec<Range<usize>>,
 
     front: Arc<Mutex<Vec<u8>>>,
-    changed: Arc<AtomicBool>,
+    notifier: mpsc::Sender<Vec<Range<usize>>>,
 }
 
 impl Server {
-    pub fn new() -> Self {
-        Self {
+    pub fn spawn() -> (Arc<Mutex<Vec<u8>>>, mpsc::Receiver<Vec<Range<usize>>>) {
+        let front = Arc::new(Mutex::new(vec![0; DISPLAY_SIZE]));
+        let (sender, reciever) = mpsc::channel();
+
+        let server = Self {
+            frame: 0,
             chunks: array::repeat(Chunk {
-                frame: 0,
                 recieved: 0,
                 encoded: vec![0; lz4_flex::block::get_maximum_output_size(CHUNK_SIZE)],
             }),
             decoded: vec![0; CHUNK_SIZE],
-            front: Arc::new(Mutex::new(vec![0; DISPLAY_SIZE])),
-            changed: Arc::new(AtomicBool::new(false)),
-        }
+            changed: vec![],
+            front: Arc::clone(&front),
+            notifier: sender,
+        };
+
+        thread::spawn(|| server.run().expect("server crashed"));
+
+        (front, reciever)
     }
 
-    pub fn run(mut self) -> anyhow::Result<()> {
+    fn run(mut self) -> anyhow::Result<()> {
         let socket = UdpSocket::bind("0.0.0.0:9921")?;
         println!("Listening on {:#?}", socket.local_addr()?);
 
@@ -59,28 +69,31 @@ impl Server {
             }
 
             let (frame, rest) = msg.split_at(size_of::<u32>());
-            let (offset, rest) = rest.split_at(size_of::<u32>());
-            let (total, rest) = rest.split_at(size_of::<u32>());
+            let (chunks, rest) = rest.split_at(size_of::<u32>());
             let (x, rest) = rest.split_at(size_of::<u8>());
             let (y, rest) = rest.split_at(size_of::<u8>());
+            let (size, rest) = rest.split_at(size_of::<u32>());
+            let (offset, rest) = rest.split_at(size_of::<u32>());
 
             let frame = u32::from_be_bytes(frame.try_into()?);
-            let offset = u32::from_be_bytes(offset.try_into()?);
-            let total = u32::from_be_bytes(total.try_into()?);
+            let chunks = u32::from_be_bytes(chunks.try_into()?);
             let x = u8::from_be_bytes(x.try_into()?);
             let y = u8::from_be_bytes(y.try_into()?);
+            let size = u32::from_be_bytes(size.try_into()?);
+            let offset = u32::from_be_bytes(offset.try_into()?);
 
-            self.message(frame, offset, total, x, y, rest)?;
+            self.message(frame, chunks, x, y, size, offset, rest)?;
         }
     }
 
     fn message(
         &mut self,
         frame: u32,
-        offset: u32,
-        total: u32,
+        chunks: u32,
         x: u8,
         y: u8,
+        size: u32,
+        offset: u32,
         data: &[u8],
     ) -> anyhow::Result<()> {
         if !(0..(DISPLAY_WIDTH / CHUNK_WIDTH) as u8).contains(&x) {
@@ -91,19 +104,23 @@ impl Server {
             return Ok(());
         }
 
-        let chunk = &mut self.chunks[y as usize * (DISPLAY_WIDTH / CHUNK_WIDTH) + x as usize];
-
-        if frame < chunk.frame {
+        if frame < self.frame {
             return Ok(());
-        } else if frame > chunk.frame {
-            chunk.frame = frame;
-            chunk.recieved = 0;
+        } else if frame > self.frame {
+            self.frame = frame;
+            self.changed.clear();
+
+            for chunk in &mut self.chunks {
+                chunk.recieved = 0;
+            }
         }
+
+        let chunk = &mut self.chunks[y as usize * (DISPLAY_WIDTH / CHUNK_WIDTH) + x as usize];
 
         chunk.encoded[offset as usize..offset as usize + data.len()].copy_from_slice(data);
         chunk.recieved += data.len() as u32;
 
-        if chunk.recieved == total {
+        if chunk.recieved == size {
             {
                 let mut front = self.front.lock().unwrap();
 
@@ -112,21 +129,17 @@ impl Server {
                     &mut self.decoded,
                     x,
                     y,
-                    &chunk.encoded[..total as usize],
+                    &chunk.encoded[..size as usize],
                 );
             }
 
-            self.changed.store(true, atomic::Ordering::SeqCst);
+            self.changed.push(codec::framebuffer_indices(x, y));
+
+            if self.changed.len() as u32 == chunks {
+                self.notifier.send(self.changed.clone()).unwrap();
+            }
         }
 
         Ok(())
-    }
-
-    pub fn front(&self) -> Arc<Mutex<Vec<u8>>> {
-        Arc::clone(&self.front)
-    }
-
-    pub fn changed(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.changed)
     }
 }

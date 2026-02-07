@@ -1,10 +1,11 @@
 use std::{
     iter,
+    ops::Range,
     sync::{
         Arc, Mutex,
         atomic::{self, AtomicBool},
+        mpsc,
     },
-    thread,
 };
 
 use server::Server;
@@ -22,9 +23,8 @@ use winit::{
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct StandardUniform {
-    inner_size: [f32; 2],
-    scale_factor: f32,
-    _padding: u32,
+    screen_size: [f32; 2],
+    kindle_size: [f32; 2],
 }
 
 pub struct State {
@@ -37,8 +37,7 @@ pub struct State {
     render_pipeline: wgpu::RenderPipeline,
 
     screen_buffer: Arc<Mutex<Vec<u8>>>,
-    screen_changed: Arc<AtomicBool>,
-    screen_size: wgpu::Extent3d,
+    screen_changed: mpsc::Receiver<Vec<Range<usize>>>,
     screen_texture: wgpu::Texture,
     screen_bind_group: wgpu::BindGroup,
 
@@ -53,7 +52,7 @@ impl State {
     pub async fn new(
         window: Arc<Window>,
         screen_buffer: Arc<Mutex<Vec<u8>>>,
-        screen_changed: Arc<AtomicBool>,
+        screen_changed: mpsc::Receiver<Vec<Range<usize>>>,
     ) -> anyhow::Result<Self> {
         let inner_size = window.inner_size();
         let scale_factor = window.scale_factor();
@@ -104,14 +103,12 @@ impl State {
             desired_maximum_frame_latency: 2,
         };
 
-        let screen_size = wgpu::Extent3d {
-            width: DISPLAY_WIDTH as u32,
-            height: DISPLAY_HEIGHT as u32,
-            depth_or_array_layers: 1,
-        };
-
         let screen_texture = device.create_texture(&wgpu::TextureDescriptor {
-            size: screen_size,
+            size: wgpu::Extent3d {
+                width: DISPLAY_WIDTH as u32,
+                height: DISPLAY_HEIGHT as u32,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -173,9 +170,8 @@ impl State {
         });
 
         let standard_uniform = StandardUniform {
-            inner_size: [inner_size.width as f32, inner_size.height as f32],
-            scale_factor: scale_factor as f32,
-            _padding: 0,
+            screen_size: [inner_size.width as f32, inner_size.height as f32],
+            kindle_size: [DISPLAY_WIDTH as f32, DISPLAY_HEIGHT as f32],
         };
 
         let standard_uniform_buffer =
@@ -267,7 +263,6 @@ impl State {
 
             screen_buffer,
             screen_changed,
-            screen_size,
             screen_texture,
             screen_bind_group,
 
@@ -284,7 +279,7 @@ impl State {
             self.config.width = width;
             self.config.height = height;
 
-            self.standard_uniform.inner_size = [width as f32, height as f32];
+            self.standard_uniform.screen_size = [width as f32, height as f32];
 
             self.surface.configure(&self.device, &self.config);
             self.is_surface_configured = true;
@@ -334,24 +329,32 @@ impl State {
                 label: Some("Render Encoder"),
             });
 
-        if self.screen_changed.swap(false, atomic::Ordering::SeqCst) {
-            let buffer = self.screen_buffer.lock().unwrap();
+        match self.screen_changed.try_recv() {
+            Ok(changed) => {
+                let buffer = self.screen_buffer.lock().unwrap();
 
-            self.queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &self.screen_texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                &buffer,
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(DISPLAY_WIDTH as u32),
-                    rows_per_image: Some(DISPLAY_HEIGHT as u32),
-                },
-                self.screen_size,
-            );
+                self.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &self.screen_texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    &buffer,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(DISPLAY_WIDTH as u32),
+                        rows_per_image: Some(DISPLAY_HEIGHT as u32),
+                    },
+                    wgpu::Extent3d {
+                        width: DISPLAY_WIDTH as u32,
+                        height: DISPLAY_HEIGHT as u32,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
+            Err(mpsc::TryRecvError::Empty) => (),
+            Err(mpsc::TryRecvError::Disconnected) => panic!(),
         }
 
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -405,11 +408,7 @@ impl ApplicationHandler for App {
         let window_attrs = Window::default_attributes();
         let window = event_loop.create_window(window_attrs).unwrap();
 
-        let server = Server::new();
-        let screen_buffer = server.front();
-        let screen_changed = server.changed();
-
-        thread::spawn(|| server.run().expect("server crashed"));
+        let (screen_buffer, screen_changed) = Server::spawn();
 
         self.state = Some(
             pollster::block_on(State::new(Arc::new(window), screen_buffer, screen_changed))

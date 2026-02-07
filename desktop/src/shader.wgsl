@@ -22,9 +22,8 @@ var screen_texture: texture_2d<f32>;
 var screen_sampler: sampler;
 
 struct StandardUniform {
-    inner_size: vec2<f32>,
-    scale_factor: f32,
-    _padding: u32,
+    screen_size: vec2<f32>,
+    kindle_size: vec2<f32>,
 };
 
 @group(1) @binding(0)
@@ -32,10 +31,10 @@ var<uniform> standard: StandardUniform;
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let screen_aspect_ratio = 1872.0 / 2480.0;
-    let display_aspect_ratio = standard.inner_size.x / standard.inner_size.y;
+    let screen_aspect_ratio = standard.kindle_size.x / standard.kindle_size.y;
+    let display_aspect_ratio = standard.screen_size.x / standard.screen_size.y;
 
-    var uv = vec2(in.clip_position.x / standard.inner_size.x, in.clip_position.y / standard.inner_size.y) - 0.5;
+    var uv = vec2(in.clip_position.x / standard.screen_size.x, in.clip_position.y / standard.screen_size.y) - 0.5;
 
     if (screen_aspect_ratio < display_aspect_ratio) {
         uv.x /= screen_aspect_ratio / display_aspect_ratio;
@@ -51,5 +50,5 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let dist = distance(uv, vec2(0.5));
 
-    return vec4<f32>(dist, dist, dist, 1.0);
+    return vec4<f32>(vec3(dist), 1.0);
 }

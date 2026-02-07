@@ -1,4 +1,5 @@
 use std::hash::Hasher;
+use std::ops::Range;
 use std::{io, thread};
 
 use rustc_hash::FxHasher;
@@ -114,8 +115,22 @@ pub fn encode(file: i32, framebuffer: &mut [u8], chunks: &mut [Chunk]) -> [bool;
     updated
 }
 
+pub fn decode2(framebuffer: &mut [u8], decoded: &mut [u8], x: u8, y: u8, data: &[u8]) {
+    lz4_flex::block::decompress_into(data, decoded).expect("decompression shouldn't fail");
+}
+
 pub fn decode(framebuffer: &mut [u8], decoded: &mut [u8], x: u8, y: u8, data: &[u8]) {
     lz4_flex::block::decompress_into(data, decoded).expect("decompression shouldn't fail");
 
     Chunk::decode(framebuffer, decoded, x, y);
+}
+
+pub fn framebuffer_indices(x: u8, y: u8) -> Range<usize> {
+    let frame_top_left_x = x as usize * CHUNK_WIDTH;
+    let frame_top_left_y = y as usize * CHUNK_HEIGHT;
+
+    let frame_start = frame_top_left_x + frame_top_left_y * DISPLAY_WIDTH;
+    let frame_end = frame_top_left_x + (frame_top_left_y + CHUNK_HEIGHT) * DISPLAY_WIDTH;
+
+    frame_start..frame_end + CHUNK_WIDTH
 }
