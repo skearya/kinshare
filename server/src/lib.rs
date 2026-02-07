@@ -1,7 +1,6 @@
 use std::{
     array,
     net::UdpSocket,
-    ops::Range,
     sync::{Arc, Mutex, mpsc},
     thread,
 };
@@ -26,14 +25,14 @@ pub struct Server {
 
     chunks: [Chunk; NUM_CHUNKS],
     decoded: Vec<u8>,
-    changed: Vec<Range<usize>>,
+    changed: Vec<(u8, u8)>,
 
     front: Arc<Mutex<Vec<u8>>>,
-    notifier: mpsc::Sender<Vec<Range<usize>>>,
+    notifier: mpsc::Sender<Vec<(u8, u8)>>,
 }
 
 impl Server {
-    pub fn spawn() -> (Arc<Mutex<Vec<u8>>>, mpsc::Receiver<Vec<Range<usize>>>) {
+    pub fn spawn() -> (Arc<Mutex<Vec<u8>>>, mpsc::Receiver<Vec<(u8, u8)>>) {
         let front = Arc::new(Mutex::new(vec![0; DISPLAY_SIZE]));
         let (sender, reciever) = mpsc::channel();
 
@@ -133,7 +132,7 @@ impl Server {
                 );
             }
 
-            self.changed.push(codec::framebuffer_indices(x, y));
+            self.changed.push((x, y));
 
             if self.changed.len() as u32 == chunks {
                 self.notifier.send(self.changed.clone()).unwrap();

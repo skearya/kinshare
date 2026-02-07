@@ -1,11 +1,6 @@
 use std::{
     iter,
-    ops::Range,
-    sync::{
-        Arc, Mutex,
-        atomic::{self, AtomicBool},
-        mpsc,
-    },
+    sync::{Arc, Mutex, mpsc},
 };
 
 use server::Server;
@@ -37,7 +32,7 @@ pub struct State {
     render_pipeline: wgpu::RenderPipeline,
 
     screen_buffer: Arc<Mutex<Vec<u8>>>,
-    screen_changed: mpsc::Receiver<Vec<Range<usize>>>,
+    screen_changed: mpsc::Receiver<Vec<(u8, u8)>>,
     screen_texture: wgpu::Texture,
     screen_bind_group: wgpu::BindGroup,
 
@@ -52,10 +47,9 @@ impl State {
     pub async fn new(
         window: Arc<Window>,
         screen_buffer: Arc<Mutex<Vec<u8>>>,
-        screen_changed: mpsc::Receiver<Vec<Range<usize>>>,
+        screen_changed: mpsc::Receiver<Vec<(u8, u8)>>,
     ) -> anyhow::Result<Self> {
         let inner_size = window.inner_size();
-        let scale_factor = window.scale_factor();
 
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::PRIMARY,
@@ -330,7 +324,7 @@ impl State {
             });
 
         match self.screen_changed.try_recv() {
-            Ok(changed) => {
+            Ok(_changed) => {
                 let buffer = self.screen_buffer.lock().unwrap();
 
                 self.queue.write_texture(
