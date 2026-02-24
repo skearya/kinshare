@@ -5,7 +5,7 @@ use std::{io, thread};
 use rustc_hash::FxHasher;
 
 use crate::consts::{
-    CHUNK_HEIGHT, CHUNK_SIZE, CHUNK_WIDTH, DISPLAY_SIZE, DISPLAY_WIDTH, NUM_CHUNKS, THREADS,
+    CHUNK_HEIGHT, CHUNK_SIZE, CHUNK_WIDTH, DISPLAY_SIZE, DISPLAY_WIDTH, NUM_CHUNKS, NUM_THREADS,
 };
 
 #[derive(Clone)]
@@ -83,19 +83,19 @@ pub fn encode(file: i32, framebuffer: &mut [u8], chunks: &mut [Chunk]) -> [bool;
 
     thread::scope(|s| {
         for (n, ((framebuffer, chunks), updated)) in framebuffer
-            .chunks_exact_mut(DISPLAY_SIZE / THREADS)
-            .zip(chunks.chunks_exact_mut(NUM_CHUNKS / THREADS))
-            .zip(updated.chunks_exact_mut(NUM_CHUNKS / THREADS))
+            .chunks_exact_mut(DISPLAY_SIZE / NUM_THREADS)
+            .zip(chunks.chunks_exact_mut(NUM_CHUNKS / NUM_THREADS))
+            .zip(updated.chunks_exact_mut(NUM_CHUNKS / NUM_THREADS))
             .enumerate()
         {
             s.spawn(move || {
-                let offset = n * (DISPLAY_SIZE / THREADS);
+                let offset = n * (DISPLAY_SIZE / NUM_THREADS);
 
                 if unsafe {
                     libc::pread(
                         file,
                         framebuffer.as_mut_ptr().cast(),
-                        DISPLAY_SIZE / THREADS,
+                        DISPLAY_SIZE / NUM_THREADS,
                         offset as i64,
                     )
                 } == -1

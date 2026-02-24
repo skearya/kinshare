@@ -221,20 +221,20 @@ mod tests {
         let changed = codec::encode(fb0.as_raw_fd(), &mut framebuffer, &mut chunks);
         assert_eq!(changed, [true; 64]);
 
-        let mut framebuffer2 = vec![0; DISPLAY_SIZE];
-        let mut decoded = vec![0; lz4_flex::block::get_maximum_output_size(CHUNK_SIZE)];
+        let mut decoded = vec![0; DISPLAY_SIZE];
+        let mut decode_buffer = vec![0; lz4_flex::block::get_maximum_output_size(CHUNK_SIZE)];
 
         for chunk in &mut chunks {
             codec::decode(
-                &mut framebuffer2,
                 &mut decoded,
+                &mut decode_buffer,
                 chunk.x,
                 chunk.y,
                 &chunk.encoded[..chunk.size],
             );
         }
 
-        assert!(framebuffer == framebuffer2);
+        assert!(framebuffer == decoded);
 
         Ok(())
     }
