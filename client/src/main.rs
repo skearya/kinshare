@@ -1,7 +1,5 @@
 #![feature(thread_sleep_until)]
 
-mod framebuffer;
-
 use std::fs::File;
 use std::net::UdpSocket;
 use std::os::unix::prelude::*;
@@ -96,96 +94,96 @@ impl Client {
             .map(|&change| if change { 1 } else { 0 })
             .sum::<usize>();
 
-        if count != 0 {
-            let messages = self
-                .chunks
-                .iter()
-                .zip(changed)
-                .filter_map(|(chunk, changed)| if changed { Some(chunk) } else { None })
-                .map(|chunk| chunk.size.div_ceil(PACKET_SIZE - size_of::<Header>()))
-                .sum::<usize>();
-
-            self.headers
-                .reserve_exact(messages.saturating_sub(self.headers.len()));
-            self.iovecs
-                .reserve_exact((messages * 2).saturating_sub(self.iovecs.len()));
-            self.msghdrs
-                .reserve_exact(messages.saturating_sub(self.msghdrs.len()));
-
-            for chunk in self
-                .chunks
-                .iter_mut()
-                .zip(changed)
-                .filter_map(|(chunk, changed)| if changed { Some(chunk) } else { None })
-            {
-                let mut offset: u32 = 0;
-
-                for part in
-                    chunk.encoded[..chunk.size].chunks_mut(PACKET_SIZE - size_of::<Header>())
-                {
-                    let header = self.headers.push_mut(Header {
-                        frame: self.frame.to_be_bytes(),
-                        chunks: (count as u32).to_be_bytes(),
-                        x: chunk.x.to_be_bytes(),
-                        y: chunk.y.to_be_bytes(),
-                        size: (chunk.size as u32).to_be_bytes(),
-                        offset: offset.to_be_bytes(),
-                    });
-
-                    let len = self.iovecs.len();
-
-                    self.iovecs.push(libc::iovec {
-                        iov_base: (header as *mut Header).cast(),
-                        iov_len: size_of::<Header>(),
-                    });
-
-                    self.iovecs.push(libc::iovec {
-                        iov_base: part.as_mut_ptr().cast(),
-                        iov_len: part.len(),
-                    });
-
-                    self.msghdrs.push(libc::mmsghdr {
-                        msg_hdr: libc::msghdr {
-                            msg_name: ptr::null_mut(),
-                            msg_namelen: 0,
-                            msg_iov: self.iovecs[len..].as_mut_ptr(),
-                            msg_iovlen: 2,
-                            msg_control: ptr::null_mut(),
-                            msg_controllen: 0,
-                            msg_flags: 0,
-                        },
-                        msg_len: 0,
-                    });
-
-                    offset += part.len() as u32;
-                }
-            }
-
-            let mut sent = 0;
-
-            while sent != self.msghdrs.len() {
-                let n = unsafe {
-                    libc::sendmmsg(
-                        self.socket.as_raw_fd(),
-                        self.msghdrs[sent..].as_mut_ptr(),
-                        self.msghdrs[sent..].len().try_into()?,
-                        libc::MSG_NOSIGNAL.try_into()?,
-                    )
-                };
-
-                if n == -1 {
-                    panic!("sendmmsg error: {:?}", io::Error::last_os_error());
-                }
-
-                sent += n as usize;
-            }
-
-            self.headers.clear();
-            self.iovecs.clear();
-            self.msghdrs.clear();
-
-            self.frame += 1;
+        if count == 0 {
+            return Ok(());
         }
+
+        let messages = self
+            .chunks
+            .iter()
+            .zip(changed)
+            .filter_map(|(chunk, changed)| if changed { Some(chunk) } else { None })
+            .map(|chunk| chunk.size.div_ceil(PACKET_SIZE - size_of::<Header>()))
+            .sum::<usize>();
+
+        self.headers
+            .reserve_exact(messages.saturating_sub(self.headers.len()));
+        self.iovecs
+            .reserve_exact((messages * 2).saturating_sub(self.iovecs.len()));
+        self.msghdrs
+            .reserve_exact(messages.saturating_sub(self.msghdrs.len()));
+
+        for chunk in self
+            .chunks
+            .iter_mut()
+            .zip(changed)
+            .filter_map(|(chunk, changed)| if changed { Some(chunk) } else { None })
+        {
+            let mut offset: u32 = 0;
+
+            for part in chunk.encoded[..chunk.size].chunks_mut(PACKET_SIZE - size_of::<Header>()) {
+                let header = self.headers.push_mut(Header {
+                    frame: self.frame.to_be_bytes(),
+                    chunks: (count as u32).to_be_bytes(),
+                    x: chunk.x.to_be_bytes(),
+                    y: chunk.y.to_be_bytes(),
+                    size: (chunk.size as u32).to_be_bytes(),
+                    offset: offset.to_be_bytes(),
+                });
+
+                let len = self.iovecs.len();
+
+                self.iovecs.push(libc::iovec {
+                    iov_base: (header as *mut Header).cast(),
+                    iov_len: size_of::<Header>(),
+                });
+
+                self.iovecs.push(libc::iovec {
+                    iov_base: part.as_mut_ptr().cast(),
+                    iov_len: part.len(),
+                });
+
+                self.msghdrs.push(libc::mmsghdr {
+                    msg_hdr: libc::msghdr {
+                        msg_name: ptr::null_mut(),
+                        msg_namelen: 0,
+                        msg_iov: self.iovecs[len..].as_mut_ptr(),
+                        msg_iovlen: 2,
+                        msg_control: ptr::null_mut(),
+                        msg_controllen: 0,
+                        msg_flags: 0,
+                    },
+                    msg_len: 0,
+                });
+
+                offset += part.len() as u32;
+            }
+        }
+
+        let mut sent = 0;
+
+        while sent != self.msghdrs.len() {
+            let n = unsafe {
+                libc::sendmmsg(
+                    self.socket.as_raw_fd(),
+                    self.msghdrs[sent..].as_mut_ptr(),
+                    self.msghdrs[sent..].len().try_into()?,
+                    libc::MSG_NOSIGNAL.try_into()?,
+                )
+            };
+
+            if n == -1 {
+                panic!("sendmmsg error: {:?}", io::Error::last_os_error());
+            }
+
+            sent += n as usize;
+        }
+
+        self.headers.clear();
+        self.iovecs.clear();
+        self.msghdrs.clear();
+
+        self.frame += 1;
 
         Ok(())
     }

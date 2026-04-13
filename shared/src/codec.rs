@@ -1,6 +1,6 @@
-use std::hash::Hasher;
+use std::io;
 use std::ops::Range;
-use std::{io, thread};
+use std::{hash::Hasher, thread};
 
 use rustc_hash::FxHasher;
 
@@ -113,10 +113,6 @@ pub fn encode(file: i32, framebuffer: &mut [u8], chunks: &mut [Chunk]) -> [bool;
     });
 
     updated
-}
-
-pub fn decode2(framebuffer: &mut [u8], decoded: &mut [u8], x: u8, y: u8, data: &[u8]) {
-    lz4_flex::block::decompress_into(data, decoded).expect("decompression shouldn't fail");
 }
 
 pub fn decode(framebuffer: &mut [u8], decoded: &mut [u8], x: u8, y: u8, data: &[u8]) {

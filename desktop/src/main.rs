@@ -300,9 +300,7 @@ impl State {
         }
     }
 
-    fn update(&mut self) {
-        // remove `todo!()`
-    }
+    fn update(&mut self) {}
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
         self.window.request_redraw();
@@ -442,7 +440,7 @@ impl ApplicationHandler for App {
     }
 }
 
-pub fn run() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     env_logger::init();
 
     let event_loop = EventLoop::new()?;
@@ -451,8 +449,4 @@ pub fn run() -> anyhow::Result<()> {
     event_loop.run_app(&mut app)?;
 
     Ok(())
-}
-
-fn main() {
-    run().unwrap();
 }
