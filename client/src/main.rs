@@ -14,7 +14,7 @@ use shared::consts::{
 };
 use shared::messages::Header;
 
-const ADDR: &str = "192.168.15.245:9921";
+const ADDR: &str = "10.0.0.55:9921";
 const MAX_FPS: f32 = 60.0;
 
 struct Client {
@@ -79,6 +79,9 @@ impl Client {
             self.next_frame += self.frame_time;
 
             self.frame()?;
+            self.send()?;
+
+            self.frame += 1;
         }
     }
 
@@ -160,6 +163,10 @@ impl Client {
             }
         }
 
+        Ok(())
+    }
+
+    fn send(&mut self) -> anyhow::Result<()> {
         let mut sent = 0;
 
         while sent != self.msghdrs.len() {
@@ -182,8 +189,6 @@ impl Client {
         self.headers.clear();
         self.iovecs.clear();
         self.msghdrs.clear();
-
-        self.frame += 1;
 
         Ok(())
     }

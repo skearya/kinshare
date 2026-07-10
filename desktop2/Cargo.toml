@@ -1,10 +1,11 @@
 [package]
-name = "server"
+name = "desktop2"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
 shared = { path = "../shared" }
+server = { path = "../server" }
 anyhow = { workspace = true }
-lz4_flex = { workspace = true }
 iced = { workspace = true }
+bytemuck = { version = "1", features = ["derive"] }

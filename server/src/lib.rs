@@ -1,9 +1,11 @@
 use std::{
     array,
     net::UdpSocket,
-    sync::{Arc, Mutex, mpsc},
+    sync::{Arc, Mutex},
     thread,
 };
+
+use iced::futures::channel::mpsc;
 
 use shared::{
     codec,
@@ -13,6 +15,8 @@ use shared::{
     },
     messages::Header,
 };
+
+pub type Screen = Arc<Mutex<Vec<u8>>>;
 
 #[derive(Clone)]
 struct Chunk {
@@ -27,14 +31,14 @@ pub struct Server {
     decoded: Vec<u8>,
     changed: Vec<(u8, u8)>,
 
-    front: Arc<Mutex<Vec<u8>>>,
-    notifier: mpsc::Sender<Vec<(u8, u8)>>,
+    front: Screen,
+    notifier: mpsc::Sender<Screen>,
 }
 
 impl Server {
-    pub fn spawn() -> (Arc<Mutex<Vec<u8>>>, mpsc::Receiver<Vec<(u8, u8)>>) {
+    pub fn spawn() -> mpsc::Receiver<Screen> {
         let front = Arc::new(Mutex::new(vec![0; DISPLAY_SIZE]));
-        let (sender, reciever) = mpsc::channel();
+        let (sender, receiver) = mpsc::channel(64);
 
         let server = Self {
             frame: 0,
@@ -48,9 +52,9 @@ impl Server {
             notifier: sender,
         };
 
-        thread::spawn(|| server.run().expect("server crashed"));
+        thread::spawn(|| server.run().expect("server crashed?"));
 
-        (front, reciever)
+        receiver
     }
 
     fn run(mut self) -> anyhow::Result<()> {
@@ -103,15 +107,15 @@ impl Server {
             return Ok(());
         }
 
-        if frame < self.frame {
-            return Ok(());
-        } else if frame > self.frame {
+        if frame > self.frame || frame == 0 {
             self.frame = frame;
             self.changed.clear();
 
             for chunk in &mut self.chunks {
                 chunk.recieved = 0;
             }
+        } else if frame < self.frame {
+            return Ok(());
         }
 
         let chunk = &mut self.chunks[y as usize * (DISPLAY_WIDTH / CHUNK_WIDTH) + x as usize];
@@ -135,7 +139,7 @@ impl Server {
             self.changed.push((x, y));
 
             if self.changed.len() as u32 == chunks {
-                self.notifier.send(self.changed.clone()).unwrap();
+                self.notifier.try_send(Arc::clone(&self.front)).unwrap();
             }
         }
 

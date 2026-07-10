@@ -1,6 +1,9 @@
 use std::{
     iter,
-    sync::{Arc, Mutex, mpsc},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use server::Server;
@@ -32,7 +35,7 @@ pub struct State {
     render_pipeline: wgpu::RenderPipeline,
 
     screen_buffer: Arc<Mutex<Vec<u8>>>,
-    screen_changed: mpsc::Receiver<Vec<(u8, u8)>>,
+    screen_changed: Arc<AtomicBool>,
     screen_texture: wgpu::Texture,
     screen_bind_group: wgpu::BindGroup,
 
@@ -47,7 +50,7 @@ impl State {
     pub async fn new(
         window: Arc<Window>,
         screen_buffer: Arc<Mutex<Vec<u8>>>,
-        screen_changed: mpsc::Receiver<Vec<(u8, u8)>>,
+        screen_changed: Arc<AtomicBool>,
     ) -> anyhow::Result<Self> {
         let inner_size = window.inner_size();
 
@@ -321,32 +324,31 @@ impl State {
                 label: Some("Render Encoder"),
             });
 
-        match self.screen_changed.try_recv() {
-            Ok(_changed) => {
-                let buffer = self.screen_buffer.lock().unwrap();
+        if let Ok(true) =
+            self.screen_changed
+                .compare_exchange(true, false, Ordering::Acquire, Ordering::Relaxed)
+        {
+            let buffer = self.screen_buffer.lock().unwrap();
 
-                self.queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &self.screen_texture,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    &buffer,
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(DISPLAY_WIDTH as u32),
-                        rows_per_image: Some(DISPLAY_HEIGHT as u32),
-                    },
-                    wgpu::Extent3d {
-                        width: DISPLAY_WIDTH as u32,
-                        height: DISPLAY_HEIGHT as u32,
-                        depth_or_array_layers: 1,
-                    },
-                );
-            }
-            Err(mpsc::TryRecvError::Empty) => (),
-            Err(mpsc::TryRecvError::Disconnected) => panic!(),
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.screen_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &buffer,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(DISPLAY_WIDTH as u32),
+                    rows_per_image: Some(DISPLAY_HEIGHT as u32),
+                },
+                wgpu::Extent3d {
+                    width: DISPLAY_WIDTH as u32,
+                    height: DISPLAY_HEIGHT as u32,
+                    depth_or_array_layers: 1,
+                },
+            );
         }
 
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

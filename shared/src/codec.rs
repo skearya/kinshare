@@ -105,7 +105,7 @@ pub fn encode(file: i32, framebuffer: &mut [u8], chunks: &mut [Chunk]) -> [bool;
 
                 let mut buffer = [0; CHUNK_SIZE];
 
-                for (chunk, updated) in chunks.into_iter().zip(updated.into_iter()) {
+                for (chunk, updated) in chunks.iter_mut().zip(updated.iter_mut()) {
                     *updated = chunk.encode(framebuffer, offset, &mut buffer);
                 }
             });
