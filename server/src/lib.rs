@@ -107,15 +107,15 @@ impl Server {
             return Ok(());
         }
 
-        if frame > self.frame || frame == 0 {
+        if frame < self.frame {
+            return Ok(());
+        } else if frame > self.frame {
             self.frame = frame;
             self.changed.clear();
 
             for chunk in &mut self.chunks {
                 chunk.recieved = 0;
             }
-        } else if frame < self.frame {
-            return Ok(());
         }
 
         let chunk = &mut self.chunks[y as usize * (DISPLAY_WIDTH / CHUNK_WIDTH) + x as usize];
