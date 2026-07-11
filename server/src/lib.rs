@@ -7,22 +7,15 @@ use std::{
 
 use iced::futures::channel::mpsc;
 
+use mdns_sd::{ServiceDaemon, ServiceInfo};
 use shared::{
     codec,
     consts::{
         CHUNK_HEIGHT, CHUNK_SIZE, CHUNK_WIDTH, DISPLAY_HEIGHT, DISPLAY_SIZE, DISPLAY_WIDTH,
-        NUM_CHUNKS,
+        NUM_CHUNKS, TY_DOMAIN,
     },
     messages::Header,
 };
-
-pub type Screen = Arc<Mutex<Vec<u8>>>;
-
-#[derive(Clone)]
-struct Chunk {
-    recieved: u32,
-    encoded: Vec<u8>,
-}
 
 pub struct Server {
     frame: u32,
@@ -31,13 +24,26 @@ pub struct Server {
     decoded: Vec<u8>,
     changed: Vec<(u8, u8)>,
 
-    front: Screen,
-    notifier: mpsc::Sender<Screen>,
+    front: Arc<Mutex<Vec<u8>>>,
+    back: Vec<u8>,
+
+    notifier: mpsc::Sender<Message>,
+}
+
+#[derive(Clone)]
+struct Chunk {
+    recieved: u32,
+    encoded: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub enum Message {
+    Screen(Arc<Mutex<Vec<u8>>>),
+    Updated(u32),
 }
 
 impl Server {
-    pub fn spawn() -> mpsc::Receiver<Screen> {
-        let front = Arc::new(Mutex::new(vec![0; DISPLAY_SIZE]));
+    pub fn spawn() -> mpsc::Receiver<Message> {
         let (sender, receiver) = mpsc::channel(64);
 
         let server = Self {
@@ -48,7 +54,8 @@ impl Server {
             }),
             decoded: vec![0; CHUNK_SIZE],
             changed: vec![],
-            front: Arc::clone(&front),
+            front: Arc::new(Mutex::new(vec![0; DISPLAY_SIZE])),
+            back: vec![0; DISPLAY_SIZE],
             notifier: sender,
         };
 
@@ -57,7 +64,38 @@ impl Server {
         receiver
     }
 
+    fn mdns() -> anyhow::Result<ServiceDaemon> {
+        let mdns = ServiceDaemon::new()?;
+        let monitor = mdns.monitor()?;
+
+        let gethostname = gethostname::gethostname();
+
+        let my_name = gethostname.to_string_lossy();
+        let host_name = my_name.replace(' ', "-").replace('\'', "").to_lowercase() + ".local.";
+
+        let service_info =
+            ServiceInfo::new(TY_DOMAIN, &my_name, &host_name, "", 9921, None)?.enable_addr_auto();
+
+        mdns.register(service_info)?;
+        println!("Registered service {}.{}", &my_name, &TY_DOMAIN);
+
+        if cfg!(debug_assertions) {
+            std::thread::spawn(move || {
+                while let Ok(event) = monitor.recv() {
+                    println!("Daemon event: {:?}", &event);
+                }
+            });
+        }
+
+        Ok(mdns)
+    }
+
     fn run(mut self) -> anyhow::Result<()> {
+        let _mdns = Server::mdns()?;
+
+        self.notifier
+            .try_send(Message::Screen(Arc::clone(&self.front)))?;
+
         let socket = UdpSocket::bind("0.0.0.0:9921")?;
         println!("Listening on {:#?}", socket.local_addr()?);
 
@@ -124,22 +162,23 @@ impl Server {
         chunk.recieved += data.len() as u32;
 
         if chunk.recieved == size {
-            {
-                let mut front = self.front.lock().unwrap();
-
-                codec::decode(
-                    &mut front,
-                    &mut self.decoded,
-                    x,
-                    y,
-                    &chunk.encoded[..size as usize],
-                );
-            }
+            codec::decode(
+                &mut self.back,
+                &mut self.decoded,
+                x,
+                y,
+                &chunk.encoded[..size as usize],
+            );
 
             self.changed.push((x, y));
 
             if self.changed.len() as u32 == chunks {
-                self.notifier.try_send(Arc::clone(&self.front)).unwrap();
+                {
+                    let mut lock = self.front.lock().unwrap();
+                    lock.copy_from_slice(&self.back);
+                }
+
+                self.notifier.try_send(Message::Updated(self.frame))?;
             }
         }
 

@@ -10,3 +10,5 @@ pub const CHUNK_SIZE: usize = CHUNK_WIDTH * CHUNK_HEIGHT;
 pub const NUM_CHUNKS: usize = DISPLAY_SIZE / CHUNK_SIZE;
 
 pub const PACKET_SIZE: usize = 1472;
+
+pub const TY_DOMAIN: &str = "_kindle-share._udp.local.";

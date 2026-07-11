@@ -8,3 +8,5 @@ shared = { path = "../shared" }
 anyhow = { workspace = true }
 lz4_flex = { workspace = true }
 iced = { workspace = true }
+mdns-sd = { workspace = true }
+gethostname = "1.1.0"

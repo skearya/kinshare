@@ -7,9 +7,5 @@ edition = "2024"
 shared = { path = "../shared" }
 server = { path = "../server" }
 anyhow = { workspace = true }
-winit = { version = "0.30" }
-env_logger = "0.11"
-log = "0.4"
-wgpu = "28.0"
-pollster = "0.4"
-bytemuck = { version = "1.24", features = ["derive"] }
+iced = { workspace = true }
+bytemuck = { version = "1", features = ["derive"] }

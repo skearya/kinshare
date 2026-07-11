@@ -1,20 +1,20 @@
 #![feature(thread_sleep_until)]
 
 use std::fs::File;
-use std::net::UdpSocket;
+use std::net::{IpAddr, UdpSocket};
 use std::os::unix::prelude::*;
 use std::time::{Duration, Instant};
 use std::{array, io, ptr, thread};
 
+use mdns_sd::{ServiceDaemon, ServiceEvent, VERIFY_TIMEOUT_DEFAULT};
 use shared::codec;
 use shared::codec::Chunk;
 use shared::consts::{
     CHUNK_HEIGHT, CHUNK_SIZE, CHUNK_WIDTH, DISPLAY_HEIGHT, DISPLAY_SIZE, DISPLAY_WIDTH, NUM_CHUNKS,
-    PACKET_SIZE,
+    PACKET_SIZE, TY_DOMAIN,
 };
 use shared::messages::Header;
 
-const ADDR: &str = "10.0.0.55:9921";
 const MAX_FPS: f32 = 60.0;
 
 struct Client {
@@ -34,12 +34,42 @@ struct Client {
 }
 
 impl Client {
+    fn mdns() -> anyhow::Result<(IpAddr, u16)> {
+        let mdns = ServiceDaemon::new()?;
+        let receiver = mdns.browse(TY_DOMAIN)?;
+
+        while let Ok(event) = receiver.recv() {
+            if let ServiceEvent::ServiceResolved(info) = event {
+                println!(
+                    "Resolved a new service: {}\n host: {}\n port: {}",
+                    info.fullname, info.host, info.port,
+                );
+
+                for addr in info.addresses.iter() {
+                    println!(" Address: {addr}");
+
+                    if addr.is_ipv4()
+                        && mdns
+                            .verify(info.fullname.clone(), VERIFY_TIMEOUT_DEFAULT)
+                            .is_ok()
+                    {
+                        return Ok((addr.to_ip_addr(), info.port));
+                    }
+                }
+            }
+        }
+
+        panic!()
+    }
+
     fn new() -> anyhow::Result<Self> {
+        let addr = Client::mdns()?;
+
         let fb0 = File::open("/dev/fb0")?;
         let framebuffer = vec![0; DISPLAY_SIZE];
 
         let socket = UdpSocket::bind("0.0.0.0:0")?;
-        socket.connect(ADDR)?;
+        socket.connect(addr)?;
 
         let chunks = array::from_fn(|i| Chunk {
             x: (i % (DISPLAY_WIDTH / CHUNK_WIDTH)) as u8,
