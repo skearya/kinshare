@@ -5,8 +5,11 @@ edition = "2024"
 
 [dependencies]
 shared = { path = "../shared" }
-anyhow = { workspace = true }
-lz4_flex = { workspace = true }
-rustc-hash = { workspace = true }
-mdns-sd = { workspace = true }
 libc = { workspace = true }
+anyhow = { workspace = true }
+rustc-hash = { workspace = true }
+lz4_flex = { workspace = true }
+tokio = { workspace = true }
+iroh = { workspace = true }
+iroh-mdns-address-lookup = { workspace = true }
+crc-fast = "1"

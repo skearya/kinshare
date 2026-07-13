@@ -1,274 +1,210 @@
-#![feature(thread_sleep_until)]
+use std::{hash::Hasher, io, os::fd::AsRawFd, thread, time::Duration};
 
-use std::fs::File;
-use std::net::{IpAddr, UdpSocket};
-use std::os::unix::prelude::*;
-use std::time::{Duration, Instant};
-use std::{array, io, ptr, thread};
-
-use mdns_sd::{ServiceDaemon, ServiceEvent, VERIFY_TIMEOUT_DEFAULT};
-use shared::codec;
-use shared::codec::Chunk;
-use shared::consts::{
-    CHUNK_HEIGHT, CHUNK_SIZE, CHUNK_WIDTH, DISPLAY_HEIGHT, DISPLAY_SIZE, DISPLAY_WIDTH, NUM_CHUNKS,
-    PACKET_SIZE, TY_DOMAIN,
+use iroh::{Endpoint, SecretKey, endpoint::SendStream};
+use iroh_mdns_address_lookup::MdnsAddressLookup;
+use rustc_hash::FxHasher;
+use shared::consts::ALPN;
+use tokio::{
+    fs,
+    io::AsyncWriteExt,
+    time::{self, MissedTickBehavior},
 };
-use shared::messages::Header;
 
-const MAX_FPS: f32 = 60.0;
+use crate::framebuffer::Framebuffer;
 
-struct Client {
-    fb0: File,
-    socket: UdpSocket,
+mod ffi;
+mod framebuffer;
 
-    framebuffer: Vec<u8>,
-    chunks: [Chunk; NUM_CHUNKS],
+const DISPLAY_WIDTH: usize = 1872;
+const DISPLAY_HEIGHT: usize = 2480;
 
-    headers: Vec<Header>,
-    iovecs: Vec<libc::iovec>,
-    msghdrs: Vec<libc::mmsghdr>,
+struct Client {}
 
-    frame: u32,
-    frame_time: Duration,
-    next_frame: Instant,
+struct Chunk {
+    x: usize,
+    y: usize,
+    hash: u64,
+    encoded_len: usize,
+    encoded: Box<[u8]>,
+    updated: bool,
 }
 
 impl Client {
-    fn mdns() -> anyhow::Result<(IpAddr, u16)> {
-        let mdns = ServiceDaemon::new()?;
-        let receiver = mdns.browse(TY_DOMAIN)?;
+    async fn run() -> anyhow::Result<Self> {
+        let endpoint = Endpoint::builder(iroh::endpoint::presets::N0)
+            .address_lookup(MdnsAddressLookup::builder())
+            .alpns(vec![ALPN.to_vec()])
+            .bind()
+            .await?;
 
-        while let Ok(event) = receiver.recv() {
-            if let ServiceEvent::ServiceResolved(info) = event {
-                println!(
-                    "Resolved a new service: {}\n host: {}\n port: {}",
-                    info.fullname, info.host, info.port,
-                );
+        let secret_key = if let Ok(bytes) = fs::read("server.key").await {
+            SecretKey::from_bytes(&bytes.as_slice().try_into()?)
+        } else {
+            panic!("missing server.key")
+        };
 
-                for addr in info.addresses.iter() {
-                    println!(" Address: {addr}");
+        dbg!(secret_key.public().to_z32());
 
-                    if addr.is_ipv4()
-                        && mdns
-                            .verify(info.fullname.clone(), VERIFY_TIMEOUT_DEFAULT)
-                            .is_ok()
-                    {
-                        return Ok((addr.to_ip_addr(), info.port));
-                    }
-                }
-            }
-        }
+        let conn = endpoint.connect(secret_key.public(), ALPN).await?;
+        let mut send = conn.open_uni().await?;
 
-        panic!()
-    }
+        let fb = Framebuffer::open()?;
+        let fb_fd = fb.file.as_raw_fd();
 
-    fn new() -> anyhow::Result<Self> {
-        let addr = Client::mdns()?;
+        let chunks_per_dimension = 8;
 
-        let fb0 = File::open("/dev/fb0")?;
-        let framebuffer = vec![0; DISPLAY_SIZE];
+        assert_eq!(DISPLAY_WIDTH % chunks_per_dimension, 0);
+        assert_eq!(DISPLAY_HEIGHT % chunks_per_dimension, 0);
 
-        let socket = UdpSocket::bind("0.0.0.0:0")?;
-        socket.connect(addr)?;
+        let chunk_width = DISPLAY_WIDTH / chunks_per_dimension;
+        let chunk_height = DISPLAY_HEIGHT / chunks_per_dimension;
+        let chunk_count = chunks_per_dimension * chunks_per_dimension;
 
-        let chunks = array::from_fn(|i| Chunk {
-            x: (i % (DISPLAY_WIDTH / CHUNK_WIDTH)) as u8,
-            y: (i / (DISPLAY_HEIGHT / CHUNK_HEIGHT)) as u8,
-            encoded: vec![0; lz4_flex::block::get_maximum_output_size(CHUNK_SIZE)],
-            hash: 0,
-            size: 0,
-        });
+        let mut framebuffer = vec![0u8; DISPLAY_WIDTH * DISPLAY_HEIGHT].into_boxed_slice();
+        let mut chunks = (0..chunk_count)
+            .map(|i| Chunk {
+                x: i % chunks_per_dimension,
+                y: i / chunks_per_dimension,
+                hash: 0,
+                encoded_len: 0,
+                encoded: vec![
+                    0;
+                    lz4_flex::block::get_maximum_output_size(chunk_width * chunk_height)
+                ]
+                .into_boxed_slice(),
+                updated: false,
+            })
+            .collect::<Box<[Chunk]>>();
 
-        // Buffers for sendmmsg().
-        // If any of these resize unexpectedly, we will segfault!
-        let headers: Vec<Header> = vec![];
-        let iovecs: Vec<libc::iovec> = vec![];
-        let msghdrs: Vec<libc::mmsghdr> = vec![];
+        let thread_count = thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(2);
+        let thread_bytes = DISPLAY_WIDTH * DISPLAY_HEIGHT / thread_count;
 
-        let frame: u32 = 0;
-        let frame_time = Duration::from_secs_f32(1.0 / MAX_FPS);
-        let next_frame = Instant::now();
+        let mut thread_encode_buffers = vec![vec![0u8; chunk_width * chunk_height]; thread_count];
 
-        Ok(Self {
-            fb0,
-            socket,
-            framebuffer,
-            chunks,
-            headers,
-            iovecs,
-            msghdrs,
-            frame,
-            frame_time,
-            next_frame,
-        })
-    }
+        let mut interval = time::interval(Duration::from_secs_f64(1.0 / 60.0));
+        interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
-    pub fn run(mut self) -> anyhow::Result<()> {
         loop {
-            thread::sleep_until(self.next_frame);
-            self.next_frame += self.frame_time;
+            interval.tick().await;
 
-            self.frame()?;
-            self.send()?;
+            thread::scope(|s| {
+                for (i, ((framebuffer, chunks), buffer)) in framebuffer
+                    .chunks_exact_mut(thread_bytes)
+                    .zip(chunks.chunks_exact_mut(chunk_count / thread_count))
+                    .zip(thread_encode_buffers.iter_mut())
+                    .enumerate()
+                {
+                    s.spawn(move || {
+                        let file_offset = thread_bytes * i;
 
-            self.frame += 1;
-        }
-    }
+                        if unsafe {
+                            libc::pread(
+                                fb_fd,
+                                framebuffer.as_mut_ptr().cast(),
+                                thread_bytes,
+                                file_offset as i64,
+                            )
+                        } == -1
+                        {
+                            panic!("pread error: {:?}", io::Error::last_os_error());
+                        }
 
-    fn frame(&mut self) -> anyhow::Result<()> {
-        let changed = codec::encode(
-            self.fb0.as_raw_fd(),
-            &mut self.framebuffer,
-            &mut self.chunks,
-        );
+                        for chunk in chunks.iter_mut() {
+                            encode_chunk(
+                                framebuffer,
+                                file_offset,
+                                buffer.as_mut_slice(),
+                                chunk,
+                                chunk_width,
+                                chunk_height,
+                                DISPLAY_WIDTH,
+                            );
+                        }
+                    });
+                }
+            });
 
-        let count = changed
-            .iter()
-            .map(|&change| if change { 1 } else { 0 })
-            .sum::<usize>();
+            let updated = chunks.iter().filter(|c| c.updated).count();
 
-        if count == 0 {
-            return Ok(());
-        }
-
-        let messages = self
-            .chunks
-            .iter()
-            .zip(changed)
-            .filter_map(|(chunk, changed)| if changed { Some(chunk) } else { None })
-            .map(|chunk| chunk.size.div_ceil(PACKET_SIZE - size_of::<Header>()))
-            .sum::<usize>();
-
-        self.headers
-            .reserve_exact(messages.saturating_sub(self.headers.len()));
-        self.iovecs
-            .reserve_exact((messages * 2).saturating_sub(self.iovecs.len()));
-        self.msghdrs
-            .reserve_exact(messages.saturating_sub(self.msghdrs.len()));
-
-        for chunk in self
-            .chunks
-            .iter_mut()
-            .zip(changed)
-            .filter_map(|(chunk, changed)| if changed { Some(chunk) } else { None })
-        {
-            let mut offset: u32 = 0;
-
-            for part in chunk.encoded[..chunk.size].chunks_mut(PACKET_SIZE - size_of::<Header>()) {
-                let header = self.headers.push_mut(Header {
-                    frame: self.frame.to_be_bytes(),
-                    chunks: (count as u32).to_be_bytes(),
-                    x: chunk.x.to_be_bytes(),
-                    y: chunk.y.to_be_bytes(),
-                    size: (chunk.size as u32).to_be_bytes(),
-                    offset: offset.to_be_bytes(),
-                });
-
-                let len = self.iovecs.len();
-
-                self.iovecs.push(libc::iovec {
-                    iov_base: (header as *mut Header).cast(),
-                    iov_len: size_of::<Header>(),
-                });
-
-                self.iovecs.push(libc::iovec {
-                    iov_base: part.as_mut_ptr().cast(),
-                    iov_len: part.len(),
-                });
-
-                self.msghdrs.push(libc::mmsghdr {
-                    msg_hdr: libc::msghdr {
-                        msg_name: ptr::null_mut(),
-                        msg_namelen: 0,
-                        msg_iov: self.iovecs[len..].as_mut_ptr(),
-                        msg_iovlen: 2,
-                        msg_control: ptr::null_mut(),
-                        msg_controllen: 0,
-                        msg_flags: 0,
-                    },
-                    msg_len: 0,
-                });
-
-                offset += part.len() as u32;
+            if updated != 0 {
+                write_frame(updated, &mut chunks, &mut send).await?;
             }
         }
 
-        Ok(())
-    }
+        send.finish()?;
+        conn.close(0u32.into(), b"bye!");
+        endpoint.close().await;
 
-    fn send(&mut self) -> anyhow::Result<()> {
-        let mut sent = 0;
-
-        while sent != self.msghdrs.len() {
-            let n = unsafe {
-                libc::sendmmsg(
-                    self.socket.as_raw_fd(),
-                    self.msghdrs[sent..].as_mut_ptr(),
-                    self.msghdrs[sent..].len().try_into()?,
-                    libc::MSG_NOSIGNAL.try_into()?,
-                )
-            };
-
-            if n == -1 {
-                panic!("sendmmsg error: {:?}", io::Error::last_os_error());
-            }
-
-            sent += n as usize;
-        }
-
-        self.headers.clear();
-        self.iovecs.clear();
-        self.msghdrs.clear();
-
-        Ok(())
+        Ok(Self {})
     }
 }
 
-#[cfg(target_os = "linux")]
-fn main() -> anyhow::Result<()> {
-    Client::new()?.run()
-}
+async fn write_frame(
+    updated: usize,
+    chunks: &mut [Chunk],
+    send: &mut SendStream,
+) -> anyhow::Result<()> {
+    send.write_u64(updated as u64).await?;
 
-#[cfg(not(target_os = "linux"))]
-fn main() {
-    panic!("not running on a kindle?")
-}
+    for chunk in chunks.iter_mut().filter(|c| c.updated) {
+        send.write_u8(chunk.x as u8).await?;
+        send.write_u8(chunk.y as u8).await?;
+        send.write_u64(chunk.encoded_len as u64).await?;
+        send.write_all(&chunk.encoded[..chunk.encoded_len]).await?;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn codec() -> anyhow::Result<()> {
-        let fb0 = File::open("raw/frame.raw")?;
-
-        let mut framebuffer = vec![0; DISPLAY_SIZE];
-        let mut chunks: [Chunk; NUM_CHUNKS] = array::from_fn(|i| Chunk {
-            x: (i % (DISPLAY_WIDTH / CHUNK_WIDTH)) as u8,
-            y: (i / (DISPLAY_HEIGHT / CHUNK_HEIGHT)) as u8,
-            encoded: vec![0; lz4_flex::block::get_maximum_output_size(CHUNK_SIZE)],
-            hash: 0,
-            size: 0,
-        });
-
-        let changed = codec::encode(fb0.as_raw_fd(), &mut framebuffer, &mut chunks);
-        assert_eq!(changed, [true; 64]);
-
-        let mut decoded = vec![0; DISPLAY_SIZE];
-        let mut decode_buffer = vec![0; lz4_flex::block::get_maximum_output_size(CHUNK_SIZE)];
-
-        for chunk in &mut chunks {
-            codec::decode(
-                &mut decoded,
-                &mut decode_buffer,
-                chunk.x,
-                chunk.y,
-                &chunk.encoded[..chunk.size],
-            );
-        }
-
-        assert!(framebuffer == decoded);
-
-        Ok(())
+        chunk.updated = false;
     }
+
+    Ok(())
+}
+
+fn encode_chunk(
+    framebuffer: &[u8],
+    offset: usize,
+    buffer: &mut [u8],
+    chunk: &mut Chunk,
+    chunk_width: usize,
+    chunk_height: usize,
+    display_width: usize,
+) {
+    let frame_top_left_x = chunk.x as usize * chunk_width;
+    let frame_top_left_y = chunk.y as usize * chunk_height;
+
+    let mut hasher = FxHasher::default();
+
+    for row in 0..chunk_height {
+        let frame_start = (frame_top_left_x + (frame_top_left_y + row) * display_width) - offset;
+
+        hasher.write(&framebuffer[frame_start..frame_start + chunk_width]);
+
+        let buffer_start = row * chunk_width;
+
+        buffer[buffer_start..buffer_start + chunk_width]
+            .copy_from_slice(&framebuffer[frame_start..frame_start + chunk_width]);
+    }
+
+    let hash = hasher.finish();
+
+    if chunk.hash == hash {
+        chunk.updated = false;
+    } else {
+        chunk.hash = hash;
+        chunk.encoded_len = lz4_flex::block::compress_into(buffer, &mut chunk.encoded)
+            .expect("compression shouldn't fail");
+
+        chunk.updated = true;
+    }
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> anyhow::Result<()> {
+    if cfg!(not(target_os = "linux")) {
+        panic!("not running on a kindle?")
+    }
+
+    Client::run().await?;
+
+    Ok(())
 }

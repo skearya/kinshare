@@ -1,12 +1,15 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use iced::futures::{SinkExt, StreamExt};
+use iced::futures::SinkExt;
 use iced::wgpu::util::DeviceExt;
-use iced::widget::{Stack, button, center, column, container, shader, text};
+use iced::widget::{Stack, shader};
 use iced::{Element, Length, Subscription, Theme, wgpu};
 
-use server::{Message as ServerMessage, Server};
-use shared::consts::{DISPLAY_HEIGHT, DISPLAY_WIDTH};
+use tokio::sync::mpsc;
+
+const DISPLAY_WIDTH: usize = 1872;
+const DISPLAY_HEIGHT: usize = 2480;
 
 pub fn main() -> iced::Result {
     iced::application(State::default, State::update, State::view)
@@ -17,28 +20,28 @@ pub fn main() -> iced::Result {
 }
 
 struct State {
-    frame: u32,
     screen: Option<Arc<Mutex<Vec<u8>>>>,
+    updated: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone)]
 enum Message {
-    Server(ServerMessage),
+    Server(server::Message),
 }
 
 impl State {
     fn default() -> Self {
         Self {
-            frame: 0,
             screen: None,
+            updated: Arc::new(AtomicBool::new(true)),
         }
     }
 
     fn update(&mut self, message: Message) {
         match message {
             Message::Server(server) => match server {
-                ServerMessage::Screen(screen) => self.screen = Some(screen),
-                ServerMessage::Updated(frame) => self.frame = frame,
+                server::Message::Screen(screen) => self.screen = Some(screen),
+                server::Message::Updated => self.updated.store(true, Ordering::Relaxed),
             },
         }
     }
@@ -48,18 +51,14 @@ impl State {
 
         if let Some(screen) = &self.screen {
             stack = stack.push(
-                shader(KindleView { screen })
-                    .width(Length::Fill)
-                    .height(Length::Fill),
+                shader(KindleView {
+                    screen,
+                    updated: &self.updated,
+                })
+                .width(Length::Fill)
+                .height(Length::Fill),
             );
         }
-
-        stack = stack.push(
-            container(text!("Frame: {}", self.frame))
-                .align_left(Length::Fill)
-                .align_top(Length::Fill)
-                .padding(16),
-        );
 
         stack.into()
     }
@@ -79,9 +78,11 @@ impl State {
 
 fn stream() -> impl iced::futures::Stream<Item = Message> {
     iced::stream::channel(64, async |mut output| {
-        let mut receiver = Server::spawn();
+        let (sender, mut receiver) = mpsc::unbounded_channel();
 
-        while let Some(message) = receiver.next().await {
+        tokio::spawn(async { server::run(sender).await });
+
+        while let Some(message) = receiver.recv().await {
             output.send(Message::Server(message)).await.ok();
         }
     })
@@ -89,6 +90,7 @@ fn stream() -> impl iced::futures::Stream<Item = Message> {
 
 struct KindleView<'a> {
     screen: &'a Arc<Mutex<Vec<u8>>>,
+    updated: &'a Arc<AtomicBool>,
 }
 
 impl<Message> shader::Program<Message> for KindleView<'_> {
@@ -97,12 +99,13 @@ impl<Message> shader::Program<Message> for KindleView<'_> {
 
     fn draw(
         &self,
-        state: &Self::State,
-        cursor: iced::mouse::Cursor,
-        bounds: iced::Rectangle,
+        _state: &Self::State,
+        _cursor: iced::mouse::Cursor,
+        _bounds: iced::Rectangle,
     ) -> Self::Primitive {
         KindlePrimitive {
             screen: Arc::clone(self.screen),
+            updated: Arc::clone(self.updated),
         }
     }
 }
@@ -110,6 +113,7 @@ impl<Message> shader::Program<Message> for KindleView<'_> {
 #[derive(Debug)]
 struct KindlePrimitive {
     screen: Arc<Mutex<Vec<u8>>>,
+    updated: Arc<AtomicBool>,
 }
 
 impl shader::Primitive for KindlePrimitive {
@@ -118,12 +122,15 @@ impl shader::Primitive for KindlePrimitive {
     fn prepare(
         &self,
         pipeline: &mut Self::Pipeline,
-        device: &iced::wgpu::Device,
+        _device: &iced::wgpu::Device,
         queue: &iced::wgpu::Queue,
-        bounds: &iced::Rectangle,
+        _bounds: &iced::Rectangle,
         viewport: &iced::widget::shader::Viewport,
     ) {
-        pipeline.update_screen(queue, &self.screen.lock().unwrap());
+        if self.updated.swap(false, Ordering::AcqRel) {
+            pipeline.update_screen(queue, &self.screen.lock().unwrap());
+        }
+
         pipeline.update_standard(
             queue,
             StandardUniform {
@@ -161,7 +168,7 @@ struct StandardUniform {
 impl shader::Pipeline for KindlePipeline {
     fn new(
         device: &iced::wgpu::Device,
-        queue: &iced::wgpu::Queue,
+        _queue: &iced::wgpu::Queue,
         format: iced::wgpu::TextureFormat,
     ) -> Self
     where

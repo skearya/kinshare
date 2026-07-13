@@ -1,14 +1,17 @@
-set dotenv-required := true
+set dotenv-required
 
 BIN := "client"
 
 default: build copy run
 
 build:
-    RUSTFLAGS="-C target-feature=+crt-static -C opt-level=3 -C strip=symbols -C target-feature=+v7,+neon,+aes" cross build --target arm-unknown-linux-musleabi --bin {{ BIN }} --release
+    RUSTFLAGS="-C target-feature=+crt-static -C opt-level=3 -C strip=symbols" cross build --target armv7-unknown-linux-musleabihf --bin {{ BIN }} --release
 
 copy:
-    SSHPASS=$SSHPASS sshpass -e scp target/arm-unknown-linux-musleabi/release/{{ BIN }} $HOST:/mnt/us/dev/{{ BIN }}
+    SSHPASS=$SSHPASS sshpass -e scp target/armv7-unknown-linux-musleabihf/release/{{ BIN }} $HOST:/mnt/us/dev/{{ BIN }}
+
+copy-key:
+    SSHPASS=$SSHPASS sshpass -e scp server.key $HOST:/mnt/us/dev/server.key
 
 run:
     SSHPASS=$SSHPASS sshpass -e ssh $HOST "/mnt/us/dev/{{ BIN }}"

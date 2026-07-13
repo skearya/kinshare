@@ -1,187 +1,116 @@
-use std::{
-    array,
-    net::UdpSocket,
-    sync::{Arc, Mutex},
-    thread,
+use std::sync::{Arc, Mutex};
+
+use iroh::{
+    Endpoint, SecretKey,
+    endpoint::{RecvStream, presets},
 };
+use iroh_mdns_address_lookup::MdnsAddressLookup;
+use tokio::{fs, io::AsyncReadExt, sync::mpsc};
 
-use iced::futures::channel::mpsc;
+use shared::consts::ALPN;
 
-use mdns_sd::{ServiceDaemon, ServiceInfo};
-use shared::{
-    codec,
-    consts::{
-        CHUNK_HEIGHT, CHUNK_SIZE, CHUNK_WIDTH, DISPLAY_HEIGHT, DISPLAY_SIZE, DISPLAY_WIDTH,
-        NUM_CHUNKS, TY_DOMAIN,
-    },
-    messages::Header,
-};
-
-pub struct Server {
-    frame: u32,
-
-    chunks: [Chunk; NUM_CHUNKS],
-    decoded: Vec<u8>,
-    changed: Vec<(u8, u8)>,
-
-    front: Arc<Mutex<Vec<u8>>>,
-    back: Vec<u8>,
-
-    notifier: mpsc::Sender<Message>,
-}
-
-#[derive(Clone)]
-struct Chunk {
-    recieved: u32,
-    encoded: Vec<u8>,
-}
+const CHUNK_WIDTH: usize = 1872 / 8;
+const CHUNK_HEIGHT: usize = 2480 / 8;
+const DISPLAY_WIDTH: usize = 1872;
+const DISPLAY_HEIGHT: usize = 2480;
 
 #[derive(Debug, Clone)]
 pub enum Message {
     Screen(Arc<Mutex<Vec<u8>>>),
-    Updated(u32),
+    Updated,
 }
 
-impl Server {
-    pub fn spawn() -> mpsc::Receiver<Message> {
-        let (sender, receiver) = mpsc::channel(64);
+pub async fn run(sender: mpsc::UnboundedSender<Message>) -> anyhow::Result<()> {
+    let secret_key = if let Ok(bytes) = fs::read("server.key").await {
+        SecretKey::from_bytes(&bytes.as_slice().try_into()?)
+    } else {
+        // Treat this file like a password: anyone with it can
+        // impersonate your endpoint. Store it securely.
+        fs::write("server.key", SecretKey::generate().to_bytes()).await?;
 
-        let server = Self {
-            frame: 0,
-            chunks: array::repeat(Chunk {
-                recieved: 0,
-                encoded: vec![0; lz4_flex::block::get_maximum_output_size(CHUNK_SIZE)],
-            }),
-            decoded: vec![0; CHUNK_SIZE],
-            changed: vec![],
-            front: Arc::new(Mutex::new(vec![0; DISPLAY_SIZE])),
-            back: vec![0; DISPLAY_SIZE],
-            notifier: sender,
-        };
+        panic!(
+            "Wrote server information to 'server.key', share it with the kindle before running the client."
+        );
+    };
 
-        thread::spawn(|| server.run().expect("server crashed?"));
+    let endpoint = Endpoint::builder(presets::N0)
+        .secret_key(secret_key)
+        .address_lookup(MdnsAddressLookup::builder())
+        .alpns(vec![ALPN.to_vec()])
+        .bind()
+        .await?;
 
-        receiver
-    }
+    endpoint.online().await;
 
-    fn mdns() -> anyhow::Result<ServiceDaemon> {
-        let mdns = ServiceDaemon::new()?;
-        let monitor = mdns.monitor()?;
+    println!("Our endpoint id: {}", endpoint.id().to_z32());
 
-        let gethostname = gethostname::gethostname();
+    let framebuffer = Arc::new(Mutex::new(vec![0u8; DISPLAY_WIDTH * DISPLAY_HEIGHT]));
 
-        let my_name = gethostname.to_string_lossy();
-        let host_name = my_name.replace(' ', "-").replace('\'', "").to_lowercase() + ".local.";
+    sender.send(Message::Screen(Arc::clone(&framebuffer)))?;
 
-        let service_info =
-            ServiceInfo::new(TY_DOMAIN, &my_name, &host_name, "", 9921, None)?.enable_addr_auto();
+    tokio::spawn({
+        let endpoint = endpoint.clone();
 
-        mdns.register(service_info)?;
-        println!("Registered service {}.{}", &my_name, &TY_DOMAIN);
+        async move {
+            while let Some(incoming) = endpoint.accept().await {
+                let connection = incoming.await?;
+                println!("Connected to {}", connection.remote_id());
 
-        if cfg!(debug_assertions) {
-            std::thread::spawn(move || {
-                while let Ok(event) = monitor.recv() {
-                    println!("Daemon event: {:?}", &event);
-                }
-            });
-        }
+                let mut stream = connection.accept_uni().await?;
 
-        Ok(mdns)
-    }
-
-    fn run(mut self) -> anyhow::Result<()> {
-        let _mdns = Server::mdns()?;
-
-        self.notifier
-            .try_send(Message::Screen(Arc::clone(&self.front)))?;
-
-        let socket = UdpSocket::bind("0.0.0.0:9921")?;
-        println!("Listening on {:#?}", socket.local_addr()?);
-
-        let mut msg = [0; 65535];
-
-        loop {
-            let n = socket.recv(&mut msg)?;
-            let msg = &msg[..n];
-
-            if n <= size_of::<Header>() {
-                continue;
-            }
-
-            let (frame, rest) = msg.split_at(size_of::<u32>());
-            let (chunks, rest) = rest.split_at(size_of::<u32>());
-            let (x, rest) = rest.split_at(size_of::<u8>());
-            let (y, rest) = rest.split_at(size_of::<u8>());
-            let (size, rest) = rest.split_at(size_of::<u32>());
-            let (offset, rest) = rest.split_at(size_of::<u32>());
-
-            let frame = u32::from_be_bytes(frame.try_into()?);
-            let chunks = u32::from_be_bytes(chunks.try_into()?);
-            let x = u8::from_be_bytes(x.try_into()?);
-            let y = u8::from_be_bytes(y.try_into()?);
-            let size = u32::from_be_bytes(size.try_into()?);
-            let offset = u32::from_be_bytes(offset.try_into()?);
-
-            self.message(frame, chunks, x, y, size, offset, rest)?;
-        }
-    }
-
-    fn message(
-        &mut self,
-        frame: u32,
-        chunks: u32,
-        x: u8,
-        y: u8,
-        size: u32,
-        offset: u32,
-        data: &[u8],
-    ) -> anyhow::Result<()> {
-        if !(0..(DISPLAY_WIDTH / CHUNK_WIDTH) as u8).contains(&x) {
-            return Ok(());
-        }
-
-        if !(0..(DISPLAY_HEIGHT / CHUNK_HEIGHT) as u8).contains(&y) {
-            return Ok(());
-        }
-
-        if frame < self.frame {
-            return Ok(());
-        } else if frame > self.frame {
-            self.frame = frame;
-            self.changed.clear();
-
-            for chunk in &mut self.chunks {
-                chunk.recieved = 0;
-            }
-        }
-
-        let chunk = &mut self.chunks[y as usize * (DISPLAY_WIDTH / CHUNK_WIDTH) + x as usize];
-
-        chunk.encoded[offset as usize..offset as usize + data.len()].copy_from_slice(data);
-        chunk.recieved += data.len() as u32;
-
-        if chunk.recieved == size {
-            codec::decode(
-                &mut self.back,
-                &mut self.decoded,
-                x,
-                y,
-                &chunk.encoded[..size as usize],
-            );
-
-            self.changed.push((x, y));
-
-            if self.changed.len() as u32 == chunks {
-                {
-                    let mut lock = self.front.lock().unwrap();
-                    lock.copy_from_slice(&self.back);
+                while let Ok(()) = read_frame(&mut stream, &framebuffer).await {
+                    sender.send(Message::Updated)?;
                 }
 
-                self.notifier.try_send(Message::Updated(self.frame))?;
+                stream.stop(0u8.into())?;
+                connection.close(0u8.into(), &[]);
             }
-        }
 
-        Ok(())
+            anyhow::Ok(())
+        }
+    });
+
+    endpoint.close().await;
+
+    Ok(())
+}
+
+async fn read_frame(
+    stream: &mut RecvStream,
+    framebuffer: &Arc<Mutex<Vec<u8>>>,
+) -> anyhow::Result<()> {
+    let chunks = stream.read_u64().await?;
+
+    let mut encoded = vec![0; lz4_flex::block::get_maximum_output_size(CHUNK_WIDTH * CHUNK_HEIGHT)];
+    let mut decoded = vec![0; CHUNK_WIDTH * CHUNK_HEIGHT];
+
+    for _ in 0..chunks {
+        let x = stream.read_u8().await?;
+        let y = stream.read_u8().await?;
+        let encoded_len = stream.read_u64().await? as usize;
+        stream.read_exact(&mut encoded[..encoded_len]).await?;
+
+        {
+            let mut lock = framebuffer.lock().unwrap();
+
+            decode_chunk(&mut lock, &mut decoded, x, y, &encoded[..encoded_len]);
+        }
+    }
+
+    Ok(())
+}
+
+pub fn decode_chunk(framebuffer: &mut [u8], decoded: &mut [u8], x: u8, y: u8, data: &[u8]) {
+    lz4_flex::block::decompress_into(data, decoded).expect("decompression shouldn't fail");
+
+    let frame_top_left_x = x as usize * CHUNK_WIDTH;
+    let frame_top_left_y = y as usize * CHUNK_HEIGHT;
+
+    for row in 0..CHUNK_HEIGHT {
+        let frame_start = frame_top_left_x + (frame_top_left_y + row) * DISPLAY_WIDTH;
+        let buffer_start = row * CHUNK_WIDTH;
+
+        framebuffer[frame_start..frame_start + CHUNK_WIDTH]
+            .copy_from_slice(&decoded[buffer_start..buffer_start + CHUNK_WIDTH]);
     }
 }

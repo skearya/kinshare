@@ -5,3 +5,5 @@ target/
 
 out/
 raw/
+
+*.key
