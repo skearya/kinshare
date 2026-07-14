@@ -21,7 +21,10 @@ impl Framebuffer {
     /// This works on any Kindle model - the resolution and stride are read at
     /// runtime rather than being hardcoded.
     pub(crate) fn open() -> std::io::Result<Self> {
-        let file = std::fs::OpenOptions::new().read(true).open("/dev/fb0")?;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/fb0")?;
 
         let fd = file.as_raw_fd();
 

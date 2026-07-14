@@ -40,8 +40,6 @@ pub async fn run(sender: mpsc::UnboundedSender<Message>) -> anyhow::Result<()> {
         .bind()
         .await?;
 
-    endpoint.online().await;
-
     println!("Our endpoint id: {}", endpoint.id().to_z32());
 
     let framebuffer = Arc::new(Mutex::new(vec![0u8; DISPLAY_WIDTH * DISPLAY_HEIGHT]));
@@ -66,11 +64,11 @@ pub async fn run(sender: mpsc::UnboundedSender<Message>) -> anyhow::Result<()> {
                 connection.close(0u8.into(), &[]);
             }
 
+            endpoint.close().await;
+
             anyhow::Ok(())
         }
     });
-
-    endpoint.close().await;
 
     Ok(())
 }

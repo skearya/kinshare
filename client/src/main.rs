@@ -43,9 +43,9 @@ impl Client {
             panic!("missing server.key")
         };
 
-        dbg!(secret_key.public().to_z32());
-
         let conn = endpoint.connect(secret_key.public(), ALPN).await?;
+        println!("Connected to {}", conn.remote_id());
+
         let mut send = conn.open_uni().await?;
 
         let fb = Framebuffer::open()?;
@@ -76,9 +76,7 @@ impl Client {
             })
             .collect::<Box<[Chunk]>>();
 
-        let thread_count = thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(2);
+        let thread_count = 2;
         let thread_bytes = DISPLAY_WIDTH * DISPLAY_HEIGHT / thread_count;
 
         let mut thread_encode_buffers = vec![vec![0u8; chunk_width * chunk_height]; thread_count];
