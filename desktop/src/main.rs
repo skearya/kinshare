@@ -1,19 +1,162 @@
-use std::{
-    iter,
-    sync::{Arc, Mutex, mpsc},
-};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
-use server::Server;
-use shared::consts::{DISPLAY_HEIGHT, DISPLAY_WIDTH};
-use wgpu::util::DeviceExt;
-use winit::{
-    application::ApplicationHandler,
-    dpi::PhysicalSize,
-    event::{ElementState, KeyEvent, WindowEvent},
-    event_loop::{ActiveEventLoop, EventLoop},
-    keyboard::{KeyCode, PhysicalKey},
-    window::{Window, WindowId},
-};
+use iced::futures::SinkExt;
+use iced::wgpu::util::DeviceExt;
+use iced::widget::{Stack, shader};
+use iced::{Element, Length, Subscription, Theme, wgpu};
+
+use tokio::sync::mpsc;
+
+const DISPLAY_WIDTH: usize = 1872;
+const DISPLAY_HEIGHT: usize = 2480;
+
+pub fn main() -> iced::Result {
+    iced::application(State::default, State::update, State::view)
+        .subscription(State::subscription)
+        .title(State::title)
+        .theme(State::theme)
+        .run()
+}
+
+struct State {
+    screen: Option<Arc<Mutex<Vec<u8>>>>,
+    updated: Arc<AtomicBool>,
+}
+
+#[derive(Debug, Clone)]
+enum Message {
+    Server(server::Message),
+}
+
+impl State {
+    fn default() -> Self {
+        Self {
+            screen: None,
+            updated: Arc::new(AtomicBool::new(true)),
+        }
+    }
+
+    fn update(&mut self, message: Message) {
+        match message {
+            Message::Server(server) => match server {
+                server::Message::Screen(screen) => self.screen = Some(screen),
+                server::Message::Updated => self.updated.store(true, Ordering::Relaxed),
+            },
+        }
+    }
+
+    fn view(&self) -> Element<'_, Message> {
+        let mut stack = Stack::new().width(Length::Fill).height(Length::Fill);
+
+        if let Some(screen) = &self.screen {
+            stack = stack.push(
+                shader(KindleView {
+                    screen,
+                    updated: &self.updated,
+                })
+                .width(Length::Fill)
+                .height(Length::Fill),
+            );
+        }
+
+        stack.into()
+    }
+
+    fn subscription(&self) -> Subscription<Message> {
+        Subscription::run(stream)
+    }
+
+    fn title(&self) -> String {
+        "Kindle".to_owned()
+    }
+
+    fn theme(&self) -> Option<Theme> {
+        Some(Theme::Light)
+    }
+}
+
+fn stream() -> impl iced::futures::Stream<Item = Message> {
+    iced::stream::channel(64, async |mut output| {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+
+        tokio::spawn(async { server::run(sender).await });
+
+        while let Some(message) = receiver.recv().await {
+            output.send(Message::Server(message)).await.ok();
+        }
+    })
+}
+
+struct KindleView<'a> {
+    screen: &'a Arc<Mutex<Vec<u8>>>,
+    updated: &'a Arc<AtomicBool>,
+}
+
+impl<Message> shader::Program<Message> for KindleView<'_> {
+    type State = ();
+    type Primitive = KindlePrimitive;
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        _cursor: iced::mouse::Cursor,
+        _bounds: iced::Rectangle,
+    ) -> Self::Primitive {
+        KindlePrimitive {
+            screen: Arc::clone(self.screen),
+            updated: Arc::clone(self.updated),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct KindlePrimitive {
+    screen: Arc<Mutex<Vec<u8>>>,
+    updated: Arc<AtomicBool>,
+}
+
+impl shader::Primitive for KindlePrimitive {
+    type Pipeline = KindlePipeline;
+
+    fn prepare(
+        &self,
+        pipeline: &mut Self::Pipeline,
+        _device: &iced::wgpu::Device,
+        queue: &iced::wgpu::Queue,
+        _bounds: &iced::Rectangle,
+        viewport: &iced::widget::shader::Viewport,
+    ) {
+        if self.updated.swap(false, Ordering::AcqRel) {
+            pipeline.update_screen(queue, &self.screen.lock().unwrap());
+        }
+
+        pipeline.update_standard(
+            queue,
+            StandardUniform {
+                screen_size: [
+                    viewport.physical_width() as f32,
+                    viewport.physical_height() as f32,
+                ],
+                kindle_size: [DISPLAY_WIDTH as f32, DISPLAY_HEIGHT as f32],
+            },
+        );
+    }
+
+    fn draw(&self, pipeline: &Self::Pipeline, render_pass: &mut wgpu::RenderPass<'_>) -> bool {
+        pipeline.draw(render_pass);
+
+        false
+    }
+}
+
+struct KindlePipeline {
+    screen_texture: wgpu::Texture,
+    screen_texture_bind_group: wgpu::BindGroup,
+    standard_uniform_buffer: wgpu::Buffer,
+    standard_uniform_bind_group: wgpu::BindGroup,
+    render_pipeline: wgpu::RenderPipeline,
+}
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -22,82 +165,17 @@ struct StandardUniform {
     kindle_size: [f32; 2],
 }
 
-pub struct State {
-    surface: wgpu::Surface<'static>,
-    is_surface_configured: bool,
-
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    config: wgpu::SurfaceConfiguration,
-    render_pipeline: wgpu::RenderPipeline,
-
-    screen_buffer: Arc<Mutex<Vec<u8>>>,
-    screen_changed: mpsc::Receiver<Vec<(u8, u8)>>,
-    screen_texture: wgpu::Texture,
-    screen_bind_group: wgpu::BindGroup,
-
-    standard_uniform: StandardUniform,
-    standard_uniform_buffer: wgpu::Buffer,
-    standard_bind_group: wgpu::BindGroup,
-
-    window: Arc<Window>,
-}
-
-impl State {
-    pub async fn new(
-        window: Arc<Window>,
-        screen_buffer: Arc<Mutex<Vec<u8>>>,
-        screen_changed: mpsc::Receiver<Vec<(u8, u8)>>,
-    ) -> anyhow::Result<Self> {
-        let inner_size = window.inner_size();
-
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::PRIMARY,
-            ..Default::default()
-        });
-
-        let surface = instance.create_surface(Arc::clone(&window))?;
-
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptionsBase {
-                power_preference: wgpu::PowerPreference::default(),
-                force_fallback_adapter: false,
-                compatible_surface: Some(&surface),
-            })
-            .await?;
-
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: None,
-                required_features: wgpu::Features::empty(),
-                experimental_features: wgpu::ExperimentalFeatures::disabled(),
-                required_limits: wgpu::Limits::default(),
-                memory_hints: wgpu::MemoryHints::default(),
-                trace: wgpu::Trace::Off,
-            })
-            .await?;
-
-        let surface_caps = surface.get_capabilities(&adapter);
-
-        let surface_format = surface_caps
-            .formats
-            .iter()
-            .find(|format| format.is_srgb())
-            .copied()
-            .unwrap_or(surface_caps.formats[0]);
-
-        let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: surface_format,
-            width: inner_size.width,
-            height: inner_size.height,
-            present_mode: surface_caps.present_modes[0],
-            alpha_mode: surface_caps.alpha_modes[0],
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2,
-        };
-
+impl shader::Pipeline for KindlePipeline {
+    fn new(
+        device: &iced::wgpu::Device,
+        _queue: &iced::wgpu::Queue,
+        format: iced::wgpu::TextureFormat,
+    ) -> Self
+    where
+        Self: Sized,
+    {
         let screen_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Screen Texture"),
             size: wgpu::Extent3d {
                 width: DISPLAY_WIDTH as u32,
                 height: DISPLAY_HEIGHT as u32,
@@ -108,33 +186,29 @@ impl State {
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::R8Unorm,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            label: Some("screen_texture"),
             view_formats: &[],
         });
 
         let screen_texture_view =
             screen_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let screen_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
+        let screen_texture_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
 
-        let screen_bind_group_layout =
+        let screen_texture_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Screen Bind Group Layout"),
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Texture {
-                            multisampled: false,
-                            view_dimension: wgpu::TextureViewDimension::D2,
                             sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
                         },
                         count: None,
                     },
@@ -145,11 +219,11 @@ impl State {
                         count: None,
                     },
                 ],
-                label: Some("screen_bind_group_layout"),
             });
 
-        let screen_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &screen_bind_group_layout,
+        let screen_texture_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Screen Bind Group"),
+            layout: &screen_texture_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -157,15 +231,14 @@ impl State {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&screen_sampler),
+                    resource: wgpu::BindingResource::Sampler(&screen_texture_sampler),
                 },
             ],
-            label: Some("screen_bind_group"),
         });
 
         let standard_uniform = StandardUniform {
-            screen_size: [inner_size.width as f32, inner_size.height as f32],
-            kindle_size: [DISPLAY_WIDTH as f32, DISPLAY_HEIGHT as f32],
+            screen_size: [0.0, 0.0],
+            kindle_size: [0.0, 0.0],
         };
 
         let standard_uniform_buffer =
@@ -175,8 +248,9 @@ impl State {
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
 
-        let standard_bind_group_layout =
+        let standard_uniform_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Standard Bind Group Layout"),
                 entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -187,26 +261,28 @@ impl State {
                     },
                     count: None,
                 }],
-                label: Some("standard_bind_group_layout"),
             });
 
-        let standard_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &standard_bind_group_layout,
+        let standard_uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Standard Bind Group"),
+            layout: &standard_uniform_bind_group_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
                 resource: standard_uniform_buffer.as_entire_binding(),
             }],
-            label: Some("standard_bind_group"),
         });
-
-        let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
 
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Render Pipeline Layout"),
-                bind_group_layouts: &[&screen_bind_group_layout, &standard_bind_group_layout],
-                immediate_size: 0,
+                bind_group_layouts: &[
+                    &screen_texture_bind_group_layout,
+                    &standard_uniform_bind_group_layout,
+                ],
+                ..Default::default()
             });
+
+        let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
 
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Render Pipeline"),
@@ -214,27 +290,12 @@ impl State {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
                 buffers: &[],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
             primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
                 cull_mode: Some(wgpu::Face::Back),
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
+                ..Default::default()
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState {
@@ -242,211 +303,65 @@ impl State {
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             },
-            multiview_mask: None,
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview: None,
             cache: None,
         });
 
-        Ok(Self {
-            surface,
-            is_surface_configured: false,
-
-            device,
-            queue,
-            config,
-            render_pipeline,
-
-            screen_buffer,
-            screen_changed,
+        Self {
             screen_texture,
-            screen_bind_group,
-
-            standard_uniform,
+            screen_texture_bind_group,
             standard_uniform_buffer,
-            standard_bind_group,
-
-            window,
-        })
-    }
-
-    pub fn resize(&mut self, PhysicalSize { width, height }: PhysicalSize<u32>) {
-        if width > 0 && height > 0 {
-            self.config.width = width;
-            self.config.height = height;
-
-            self.standard_uniform.screen_size = [width as f32, height as f32];
-
-            self.surface.configure(&self.device, &self.config);
-            self.is_surface_configured = true;
-
-            self.queue.write_buffer(
-                &self.standard_uniform_buffer,
-                0,
-                bytemuck::cast_slice(&[self.standard_uniform]),
-            );
+            standard_uniform_bind_group,
+            render_pipeline,
         }
-    }
-
-    fn key(&self, event_loop: &ActiveEventLoop, event: KeyEvent) {
-        let PhysicalKey::Code(code) = event.physical_key else {
-            return;
-        };
-
-        let ElementState::Pressed = event.state else {
-            return;
-        };
-
-        if let KeyCode::Escape = code {
-            event_loop.exit()
-        }
-    }
-
-    fn update(&mut self) {}
-
-    pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
-        self.window.request_redraw();
-
-        if !self.is_surface_configured {
-            return Ok(());
-        }
-
-        let output = self.surface.get_current_texture()?;
-
-        let view = output
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Render Encoder"),
-            });
-
-        match self.screen_changed.try_recv() {
-            Ok(_changed) => {
-                let buffer = self.screen_buffer.lock().unwrap();
-
-                self.queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &self.screen_texture,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    &buffer,
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(DISPLAY_WIDTH as u32),
-                        rows_per_image: Some(DISPLAY_HEIGHT as u32),
-                    },
-                    wgpu::Extent3d {
-                        width: DISPLAY_WIDTH as u32,
-                        height: DISPLAY_HEIGHT as u32,
-                        depth_or_array_layers: 1,
-                    },
-                );
-            }
-            Err(mpsc::TryRecvError::Empty) => (),
-            Err(mpsc::TryRecvError::Disconnected) => panic!(),
-        }
-
-        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("Render Pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &view,
-                resolve_target: None,
-                depth_slice: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: 0.0,
-                        g: 0.0,
-                        b: 0.0,
-                        a: 1.0,
-                    }),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: None,
-            occlusion_query_set: None,
-            timestamp_writes: None,
-            multiview_mask: None,
-        });
-
-        render_pass.set_pipeline(&self.render_pipeline);
-        render_pass.set_bind_group(0, &self.screen_bind_group, &[]);
-        render_pass.set_bind_group(1, &self.standard_bind_group, &[]);
-        render_pass.draw(0..3, 0..1);
-
-        drop(render_pass);
-
-        self.queue.submit(iter::once(encoder.finish()));
-        output.present();
-
-        Ok(())
     }
 }
 
-pub struct App {
-    state: Option<State>,
-}
-
-impl App {
-    pub fn new() -> Self {
-        Self { state: None }
-    }
-}
-
-impl ApplicationHandler for App {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        let window_attrs = Window::default_attributes();
-        let window = event_loop.create_window(window_attrs).unwrap();
-
-        let (screen_buffer, screen_changed) = Server::spawn();
-
-        self.state = Some(
-            pollster::block_on(State::new(Arc::new(window), screen_buffer, screen_changed))
-                .unwrap(),
+impl KindlePipeline {
+    fn update_standard(&self, queue: &wgpu::Queue, standard_uniform: StandardUniform) {
+        queue.write_buffer(
+            &self.standard_uniform_buffer,
+            0,
+            bytemuck::cast_slice(&[standard_uniform]),
         );
     }
 
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _window_id: WindowId,
-        event: WindowEvent,
-    ) {
-        let Some(state) = &mut self.state else { return };
-
-        match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::RedrawRequested => {
-                state.update();
-
-                if let Err(e) = state.render() {
-                    if let wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated = e {
-                        state.resize(state.window.inner_size());
-                    } else {
-                        log::error!("Unable to render {}", e);
-                    }
-                }
-            }
-            WindowEvent::Resized(size) => state.resize(size),
-            WindowEvent::KeyboardInput { event, .. } => state.key(event_loop, event),
-            _ => {}
-        }
+    fn update_screen(&self, queue: &wgpu::Queue, screen: &[u8]) {
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.screen_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            screen,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(DISPLAY_WIDTH as u32),
+                rows_per_image: Some(DISPLAY_HEIGHT as u32),
+            },
+            wgpu::Extent3d {
+                width: DISPLAY_WIDTH as u32,
+                height: DISPLAY_HEIGHT as u32,
+                depth_or_array_layers: 1,
+            },
+        );
     }
 
-    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
-        // TODO: Kill server thread
+    fn draw(&self, render_pass: &mut wgpu::RenderPass<'_>) {
+        render_pass.set_pipeline(&self.render_pipeline);
+        render_pass.set_bind_group(0, &self.screen_texture_bind_group, &[]);
+        render_pass.set_bind_group(1, &self.standard_uniform_bind_group, &[]);
+        render_pass.draw(0..3, 0..1);
     }
-}
-
-fn main() -> anyhow::Result<()> {
-    env_logger::init();
-
-    let event_loop = EventLoop::new()?;
-    let mut app = App::new();
-
-    event_loop.run_app(&mut app)?;
-
-    Ok(())
 }

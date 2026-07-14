@@ -1,6 +1,6 @@
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
-    @location(0) uv: vec2<f32>,
+    @location(0) vertex_position: vec2<f32>,
 };
 
 @vertex
@@ -36,7 +36,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     var uv = vec2(in.clip_position.x / standard.screen_size.x, in.clip_position.y / standard.screen_size.y) - 0.5;
 
-    if (screen_aspect_ratio < display_aspect_ratio) {
+    if screen_aspect_ratio < display_aspect_ratio {
         uv.x /= screen_aspect_ratio / display_aspect_ratio;
     } else {
         uv.y /= display_aspect_ratio / screen_aspect_ratio;

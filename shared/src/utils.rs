@@ -29,6 +29,7 @@ macro_rules! time {
 
 #[macro_export]
 macro_rules! quickbench {
+    ($n:literal, $name:literal, $run:block) => {{ quickbench!($n, $name, $run, {}) }};
     ($n:literal, $name:literal, $run:block, $cleanup:block) => {{
         let sum = std::iter::repeat_with(|| {
             let start = std::time::Instant::now();
