@@ -21,20 +21,19 @@ pub enum Message {
 }
 
 pub async fn run(sender: mpsc::UnboundedSender<Message>) -> anyhow::Result<()> {
-    let secret_key = if let Ok(bytes) = fs::read("server.key").await {
+    let secret_key = if let Ok(bytes) = fs::read("kindle.key").await {
         SecretKey::from_bytes(&bytes.as_slice().try_into()?)
     } else {
         // Treat this file like a password: anyone with it can
         // impersonate your endpoint. Store it securely.
-        fs::write("server.key", SecretKey::generate().to_bytes()).await?;
+        fs::write("kindle.key", SecretKey::generate().to_bytes()).await?;
 
         panic!(
-            "Wrote server information to 'server.key', share it with the kindle before running the client."
+            "Wrote kindle information to 'kindle.key', share it with the kindle before running the client."
         );
     };
 
     let endpoint = Endpoint::builder(presets::N0)
-        .secret_key(secret_key)
         .address_lookup(MdnsAddressLookup::builder())
         .alpns(vec![ALPN.to_vec()])
         .bind()
@@ -43,32 +42,25 @@ pub async fn run(sender: mpsc::UnboundedSender<Message>) -> anyhow::Result<()> {
     println!("Our endpoint id: {}", endpoint.id().to_z32());
 
     let framebuffer = Arc::new(Mutex::new(vec![0u8; DISPLAY_WIDTH * DISPLAY_HEIGHT]));
-
     sender.send(Message::Screen(Arc::clone(&framebuffer)))?;
 
-    tokio::spawn({
-        let endpoint = endpoint.clone();
+    let connection = endpoint.connect(secret_key.public(), ALPN).await?;
+    println!("Connected to {}", connection.remote_id());
 
-        async move {
-            while let Some(incoming) = endpoint.accept().await {
-                let connection = incoming.await?;
-                println!("Connected to {}", connection.remote_id());
+    let mut stream = connection.accept_uni().await?;
 
-                let mut stream = connection.accept_uni().await?;
-
-                while let Ok(()) = read_frame(&mut stream, &framebuffer).await {
-                    sender.send(Message::Updated)?;
-                }
-
-                stream.stop(0u8.into())?;
-                connection.close(0u8.into(), &[]);
+    loop {
+        match read_frame(&mut stream, &framebuffer).await {
+            Ok(()) => sender.send(Message::Updated)?,
+            Err(err) => {
+                println!("Error reading frame: {err:#?}");
+                break;
             }
-
-            endpoint.close().await;
-
-            anyhow::Ok(())
         }
-    });
+    }
+
+    stream.stop(0u8.into())?;
+    connection.close(0u8.into(), &[]);
 
     Ok(())
 }

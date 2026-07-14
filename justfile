@@ -11,7 +11,7 @@ copy:
     SSHPASS=$SSHPASS sshpass -e scp target/armv7-unknown-linux-musleabihf/release/{{ BIN }} $HOST:/mnt/us/dev/{{ BIN }}
 
 copy-key:
-    SSHPASS=$SSHPASS sshpass -e scp server.key $HOST:/mnt/us/dev/server.key
+    SSHPASS=$SSHPASS sshpass -e scp kindle.key $HOST:/mnt/us/dev/kindle.key
 
 run:
     SSHPASS=$SSHPASS sshpass -e ssh $HOST "/mnt/us/dev/{{ BIN }}"

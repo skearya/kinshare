@@ -34,7 +34,7 @@ impl Framebuffer {
             libc::ioctl(
                 fd,
                 FBIOGET_VSCREENINFO as _,
-                &mut vinfo as *mut _ as *mut libc::c_void,
+                &raw mut vinfo as *mut libc::c_void,
             )
         } == -1
         {
@@ -47,7 +47,7 @@ impl Framebuffer {
             libc::ioctl(
                 fd,
                 FBIOGET_FSCREENINFO as _,
-                &mut finfo as *mut _ as *mut libc::c_void,
+                &raw mut finfo as *mut libc::c_void,
             )
         } == -1
         {
