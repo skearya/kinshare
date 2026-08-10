@@ -8,18 +8,16 @@ use iroh::{
     endpoint::{Connection, QuicTransportConfig, RecvStream, presets},
 };
 use iroh_mdns_address_lookup::MdnsAddressLookup;
-use kinshare_shared::consts::ALPN;
+use kinshare_shared::{Info, consts::ALPN};
 use tokio::{fs, io::AsyncReadExt, sync::mpsc};
-
-const CHUNK_WIDTH: usize = 1872 / 8;
-const CHUNK_HEIGHT: usize = 2480 / 8;
-const DISPLAY_WIDTH: usize = 1872;
-const DISPLAY_HEIGHT: usize = 2480;
 
 #[derive(Debug, Clone)]
 pub enum Message {
     Info(&'static str),
-    Connected(Arc<Mutex<Box<[u8]>>>),
+    Connected {
+        info: Info,
+        framebuffer: Arc<Mutex<Box<[u8]>>>,
+    },
     Updated,
     Closed,
 }
@@ -85,6 +83,7 @@ pub async fn run(sender: mpsc::UnboundedSender<Message>) -> anyhow::Result<()> {
 
 struct Stream<'a> {
     sender: &'a mpsc::UnboundedSender<Message>,
+    info: Info,
     stream: RecvStream,
     framebuffer: Arc<Mutex<Box<[u8]>>>,
     encode_buffer: Box<[u8]>,
@@ -96,23 +95,26 @@ impl<'a> Stream<'a> {
         sender: &'a mpsc::UnboundedSender<Message>,
         connection: &Connection,
     ) -> anyhow::Result<Self> {
-        let stream = connection.accept_uni().await?;
+        let mut stream = connection.accept_uni().await?;
 
-        let framebuffer = Arc::new(Mutex::new(
-            vec![0; DISPLAY_WIDTH * DISPLAY_HEIGHT].into_boxed_slice(),
-        ));
+        let info = read_info(&mut stream).await?;
+
+        let framebuffer = Arc::new(Mutex::new(vec![0; info.display_size()].into_boxed_slice()));
 
         let encode_buffer =
-            vec![0; lz4_flex::block::get_maximum_output_size(CHUNK_WIDTH * CHUNK_HEIGHT)]
-                .into_boxed_slice();
+            vec![0; lz4_flex::block::get_maximum_output_size(info.chunk_size())].into_boxed_slice();
 
-        let decode_buffer = vec![0; CHUNK_WIDTH * CHUNK_HEIGHT].into_boxed_slice();
+        let decode_buffer = vec![0; info.chunk_size()].into_boxed_slice();
 
-        sender.send(Message::Connected(Arc::clone(&framebuffer)))?;
+        sender.send(Message::Connected {
+            info: info.clone(),
+            framebuffer: Arc::clone(&framebuffer),
+        })?;
 
         Ok(Self {
-            sender,
             stream,
+            info,
+            sender,
             framebuffer,
             encode_buffer,
             decode_buffer,
@@ -126,6 +128,9 @@ impl<'a> Stream<'a> {
                 &mut self.encode_buffer,
                 &mut self.decode_buffer,
                 &self.framebuffer,
+                self.info.chunk_width(),
+                self.info.chunk_height(),
+                self.info.display_width,
             )
             .await?;
 
@@ -134,11 +139,32 @@ impl<'a> Stream<'a> {
     }
 }
 
+async fn read_info(stream: &mut RecvStream) -> anyhow::Result<Info> {
+    let display_width = stream.read_u64().await? as usize;
+    let display_height = stream.read_u64().await? as usize;
+    let chunks_per_x = stream.read_u64().await? as usize;
+    let chunks_per_y = stream.read_u64().await? as usize;
+    let thread_count = stream.read_u64().await? as usize;
+    let fps = stream.read_f64().await?;
+
+    Ok(Info {
+        display_width,
+        display_height,
+        chunks_per_x,
+        chunks_per_y,
+        thread_count,
+        fps,
+    })
+}
+
 async fn read_frame(
     stream: &mut RecvStream,
     encode_buffer: &mut [u8],
     decode_buffer: &mut [u8],
     framebuffer: &Arc<Mutex<Box<[u8]>>>,
+    chunk_width: usize,
+    chunk_height: usize,
+    display_width: usize,
 ) -> anyhow::Result<()> {
     let chunks = stream.read_u64().await?;
 
@@ -156,23 +182,35 @@ async fn read_frame(
             x,
             y,
             &encode_buffer[..encoded_len],
+            chunk_width,
+            chunk_height,
+            display_width,
         );
     }
 
     Ok(())
 }
 
-pub fn decode_chunk(framebuffer: &mut [u8], decoded: &mut [u8], x: u8, y: u8, data: &[u8]) {
+pub fn decode_chunk(
+    framebuffer: &mut [u8],
+    decoded: &mut [u8],
+    x: u8,
+    y: u8,
+    data: &[u8],
+    chunk_width: usize,
+    chunk_height: usize,
+    display_width: usize,
+) {
     lz4_flex::block::decompress_into(data, decoded).expect("decompression shouldn't fail");
 
-    let frame_top_left_x = x as usize * CHUNK_WIDTH;
-    let frame_top_left_y = y as usize * CHUNK_HEIGHT;
+    let frame_top_left_x = x as usize * chunk_width;
+    let frame_top_left_y = y as usize * chunk_height;
 
-    for row in 0..CHUNK_HEIGHT {
-        let frame_start = frame_top_left_x + (frame_top_left_y + row) * DISPLAY_WIDTH;
-        let buffer_start = row * CHUNK_WIDTH;
+    for row in 0..chunk_height {
+        let frame_start = frame_top_left_x + (frame_top_left_y + row) * display_width;
+        let buffer_start = row * chunk_width;
 
-        framebuffer[frame_start..frame_start + CHUNK_WIDTH]
-            .copy_from_slice(&decoded[buffer_start..buffer_start + CHUNK_WIDTH]);
+        framebuffer[frame_start..frame_start + chunk_width]
+            .copy_from_slice(&decoded[buffer_start..buffer_start + chunk_width]);
     }
 }

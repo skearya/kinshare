@@ -5,7 +5,7 @@ use iroh::{
     endpoint::{Connection, QuicTransportConfig, SendStream, presets},
 };
 use iroh_mdns_address_lookup::MdnsAddressLookup;
-use kinshare_shared::consts::ALPN;
+use kinshare_shared::{Info, consts::ALPN};
 use rustc_hash::FxHasher;
 use tokio::{
     fs,
@@ -50,11 +50,11 @@ async fn run() -> anyhow::Result<()> {
     println!("Endpoint id: {}", endpoint.id().to_z32());
 
     while let Some(incoming) = endpoint.accept().await {
-        let connection = incoming.await?;
+        let Ok(connection) = incoming.await else {
+            continue;
+        };
 
-        if server_key.public() == connection.remote_id() {
-            println!("Connected to: {}", connection.remote_id());
-        } else {
+        if server_key.public() != connection.remote_id() {
             println!(
                 "Non-server tried connecting to us: {}",
                 connection.remote_id()
@@ -63,6 +63,8 @@ async fn run() -> anyhow::Result<()> {
             connection.close(0u8.into(), b"Unauthorized");
             continue;
         }
+
+        println!("Connected to: {}", connection.remote_id());
 
         match Stream::new(&connection).await {
             Ok(stream) => {
@@ -91,15 +93,6 @@ struct Stream {
     interval: Interval,
 }
 
-struct Info {
-    display_width: usize,
-    display_height: usize,
-    chunks_per_x: usize,
-    chunks_per_y: usize,
-    thread_count: usize,
-    fps: f64,
-}
-
 struct Chunk {
     x: usize,
     y: usize,
@@ -107,28 +100,6 @@ struct Chunk {
     encoded: Box<[u8]>,
     encoded_len: usize,
     updated: bool,
-}
-
-impl Info {
-    fn display_size(&self) -> usize {
-        self.display_width * self.display_height
-    }
-
-    fn chunk_width(&self) -> usize {
-        self.display_width / self.chunks_per_x
-    }
-
-    fn chunk_height(&self) -> usize {
-        self.display_height / self.chunks_per_y
-    }
-
-    fn chunk_count(&self) -> usize {
-        self.chunks_per_x * self.chunks_per_y
-    }
-
-    fn chunk_size(&self) -> usize {
-        self.chunk_width() * self.chunk_height()
-    }
 }
 
 impl Stream {
@@ -167,7 +138,9 @@ impl Stream {
         let mut interval = time::interval(Duration::from_secs_f64(1.0 / info.fps));
         interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
-        let stream = connection.open_uni().await?;
+        let mut stream = connection.open_uni().await?;
+
+        write_info(&mut stream, &info).await?;
 
         Ok(Self {
             stream,
@@ -235,6 +208,17 @@ impl Stream {
             }
         }
     }
+}
+
+async fn write_info(stream: &mut SendStream, info: &Info) -> anyhow::Result<()> {
+    stream.write_u64(info.display_width as u64).await?;
+    stream.write_u64(info.display_height as u64).await?;
+    stream.write_u64(info.chunks_per_x as u64).await?;
+    stream.write_u64(info.chunks_per_y as u64).await?;
+    stream.write_u64(info.thread_count as u64).await?;
+    stream.write_f64(info.fps).await?;
+
+    Ok(())
 }
 
 fn encode_chunk(

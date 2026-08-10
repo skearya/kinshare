@@ -6,10 +6,8 @@ use iced::wgpu::util::DeviceExt;
 use iced::widget::{Column, Stack, center, shader, text};
 use iced::{Alignment, Element, Length, Subscription, Theme, wgpu};
 
+use kinshare_shared::Info;
 use tokio::sync::mpsc;
-
-const DISPLAY_WIDTH: usize = 1872;
-const DISPLAY_HEIGHT: usize = 2480;
 
 pub fn main() -> iced::Result {
     iced::application(State::default, State::update, State::view)
@@ -20,9 +18,15 @@ pub fn main() -> iced::Result {
 }
 
 struct State {
-    info: Vec<&'static str>,
-    screen: Option<Arc<Mutex<Box<[u8]>>>>,
-    updated: Arc<AtomicBool>,
+    messages: Vec<&'static str>,
+    stream: Option<Arc<StreamState>>,
+}
+
+#[derive(Debug)]
+struct StreamState {
+    info: Info,
+    updated: AtomicBool,
+    framebuffer: Arc<Mutex<Box<[u8]>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -33,36 +37,44 @@ enum Message {
 impl State {
     fn default() -> Self {
         Self {
-            info: vec!["Initializing..."],
-            screen: None,
-            updated: Arc::new(AtomicBool::new(true)),
+            messages: vec!["Initializing..."],
+            stream: None,
         }
     }
 
     fn update(&mut self, Message::Server(server): Message) {
         match server {
-            kinshare_server::Message::Info(message) => self.info.push(message),
-            kinshare_server::Message::Connected(screen) => self.screen = Some(screen),
-            kinshare_server::Message::Updated => self.updated.store(true, Ordering::Relaxed),
-            kinshare_server::Message::Closed => self.screen = None,
+            kinshare_server::Message::Info(message) => self.messages.push(message),
+            kinshare_server::Message::Connected { info, framebuffer } => {
+                self.stream = Some(Arc::new(StreamState {
+                    info,
+                    updated: AtomicBool::new(true),
+                    framebuffer,
+                }))
+            }
+            kinshare_server::Message::Updated => {
+                let Some(stream) = &self.stream else {
+                    return;
+                };
+
+                stream.updated.store(true, Ordering::Relaxed);
+            }
+            kinshare_server::Message::Closed => self.stream = None,
         }
     }
 
     fn view(&self) -> Element<'_, Message> {
         let mut stack = Stack::new().width(Length::Fill).height(Length::Fill);
 
-        if let Some(screen) = &self.screen {
+        if let Some(stream) = &self.stream {
             stack = stack.push(
-                shader(KindleView {
-                    screen,
-                    updated: &self.updated,
-                })
-                .width(Length::Fill)
-                .height(Length::Fill),
+                shader(KindleView { stream })
+                    .width(Length::Fill)
+                    .height(Length::Fill),
             );
         } else {
             stack = stack.push(center(
-                Column::with_children(self.info.iter().map(|msg| text!("{}", msg).into()))
+                Column::with_children(self.messages.iter().map(|msg| text!("{}", msg).into()))
                     .align_x(Alignment::Center)
                     .spacing(4.0),
             ))
@@ -97,8 +109,7 @@ fn stream() -> impl iced::futures::Stream<Item = Message> {
 }
 
 struct KindleView<'a> {
-    screen: &'a Arc<Mutex<Box<[u8]>>>,
-    updated: &'a Arc<AtomicBool>,
+    stream: &'a Arc<StreamState>,
 }
 
 impl<Message> shader::Program<Message> for KindleView<'_> {
@@ -112,16 +123,14 @@ impl<Message> shader::Program<Message> for KindleView<'_> {
         _bounds: iced::Rectangle,
     ) -> Self::Primitive {
         KindlePrimitive {
-            screen: Arc::clone(self.screen),
-            updated: Arc::clone(self.updated),
+            stream: Arc::clone(self.stream),
         }
     }
 }
 
 #[derive(Debug)]
 struct KindlePrimitive {
-    screen: Arc<Mutex<Box<[u8]>>>,
-    updated: Arc<AtomicBool>,
+    stream: Arc<StreamState>,
 }
 
 impl shader::Primitive for KindlePrimitive {
@@ -140,24 +149,27 @@ impl shader::Primitive for KindlePrimitive {
                 viewport.physical_width() as f32,
                 viewport.physical_height() as f32,
             ],
-            kindle_size: [DISPLAY_WIDTH as f32, DISPLAY_HEIGHT as f32],
+            kindle_size: [
+                self.stream.info.display_width as f32,
+                self.stream.info.display_height as f32,
+            ],
         };
 
         if pipeline.inner.is_none() {
             pipeline.init(
                 device,
-                DISPLAY_WIDTH as u32,
-                DISPLAY_HEIGHT as u32,
+                self.stream.info.display_width as u32,
+                self.stream.info.display_height as u32,
                 standard_uniform,
             );
         }
 
-        if self.updated.swap(false, Ordering::AcqRel) {
+        if self.stream.updated.swap(false, Ordering::AcqRel) {
             pipeline.update_screen(
                 queue,
-                DISPLAY_WIDTH as u32,
-                DISPLAY_HEIGHT as u32,
-                &self.screen.lock().unwrap(),
+                self.stream.info.display_width as u32,
+                self.stream.info.display_height as u32,
+                &self.stream.framebuffer.lock().unwrap(),
             );
         }
 
