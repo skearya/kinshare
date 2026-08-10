@@ -1,0 +1,36 @@
+{
+	"items": [
+		{
+			"name": "Kinshare",
+			"items": [
+				{
+					"name": "Start Kinshare",
+					"action": "/mnt/us/extensions/kinshare/bin/start.sh",
+					"exitmenu": false,
+					"checked": false,
+					"refresh": false,
+					"status": true,
+					"internal": "status Start Kinshare"
+				},
+				{
+					"name": "Stop Kinshare",
+					"action": "/mnt/us/extensions/kinshare/bin/stop.sh",
+					"exitmenu": false,
+					"checked": false,
+					"refresh": false,
+					"status": true,
+					"internal": "status Stop Kinshare"
+				},
+				{
+					"name": "Update Kinshare",
+					"action": "/mnt/us/extensions/kinshare/bin/update.sh",
+					"exitmenu": false,
+					"checked": false,
+					"refresh": false,
+					"status": true,
+					"internal": "status Update Kinshare"
+				}
+			]
+		}
+	]
+}

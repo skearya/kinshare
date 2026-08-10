@@ -6,7 +6,7 @@ members = ["client", "desktop", "server", "shared"]
 libc = "0.2"
 anyhow = "1.0"
 rustc-hash = "2.1"
-lz4_flex = { version = "0.13", default-features = false }
+lz4_flex = { version = "0.14", default-features = false, features = ["alloc"] }
 tokio = { version = "1.52", features = ["signal"] }
 iroh = "1.0"
 iroh-mdns-address-lookup = "0.4"

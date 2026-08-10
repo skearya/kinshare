@@ -1,106 +1,140 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use iroh::{
     Endpoint, SecretKey,
-    endpoint::{RecvStream, presets},
+    endpoint::{Connection, QuicTransportConfig, RecvStream, presets},
 };
 use iroh_mdns_address_lookup::MdnsAddressLookup;
-use tokio::{fs, io::AsyncReadExt, sync::mpsc};
-
-use shared::consts::ALPN;
-
-const CHUNK_WIDTH: usize = 1872 / 8;
-const CHUNK_HEIGHT: usize = 2480 / 8;
-const DISPLAY_WIDTH: usize = 1872;
-const DISPLAY_HEIGHT: usize = 2480;
+use kinshare_shared::{consts::ALPN, messages};
+use tokio::{fs, sync::mpsc};
 
 #[derive(Debug, Clone)]
 pub enum Message {
-    Screen(Arc<Mutex<Vec<u8>>>),
+    Message(&'static str),
+    Connected {
+        info: messages::Info,
+        framebuffer: Arc<Mutex<Box<[u8]>>>,
+    },
     Updated,
+    Closed,
 }
 
 pub async fn run(sender: mpsc::UnboundedSender<Message>) -> anyhow::Result<()> {
-    let secret_key = if let Ok(bytes) = fs::read("kindle.key").await {
-        SecretKey::from_bytes(&bytes.as_slice().try_into()?)
+    let (server_key, kindle_key) = if let Ok(bytes) = fs::read("connection.keys").await {
+        (
+            SecretKey::from_bytes(&bytes[..32].try_into()?),
+            SecretKey::from_bytes(&bytes[32..64].try_into()?),
+        )
     } else {
-        // Treat this file like a password: anyone with it can
-        // impersonate your endpoint. Store it securely.
-        fs::write("kindle.key", SecretKey::generate().to_bytes()).await?;
+        let server_key = SecretKey::generate();
+        let kindle_key = SecretKey::generate();
 
-        panic!(
-            "Wrote kindle information to 'kindle.key', share it with the kindle before running the client."
-        );
+        let data = [server_key.to_bytes(), kindle_key.to_bytes()].concat();
+
+        fs::write("connection.keys", data).await?;
+
+        sender.send(
+            Message::Message("Wrote connection information to 'connection.keys'. Share it with the kindle in '/mnt/us/extensions/kinshare/connection.keys'.")
+        )?;
+
+        (server_key, kindle_key)
     };
 
     let endpoint = Endpoint::builder(presets::N0)
+        .secret_key(server_key)
         .address_lookup(MdnsAddressLookup::builder())
+        .transport_config(
+            QuicTransportConfig::builder()
+                .max_idle_timeout(Some(Duration::from_secs(10).try_into()?))
+                .build(),
+        )
         .alpns(vec![ALPN.to_vec()])
         .bind()
         .await?;
 
-    println!("Our endpoint id: {}", endpoint.id().to_z32());
+    println!("Endpoint id: {}", endpoint.id().to_z32());
 
-    let framebuffer = Arc::new(Mutex::new(vec![0u8; DISPLAY_WIDTH * DISPLAY_HEIGHT]));
-    sender.send(Message::Screen(Arc::clone(&framebuffer)))?;
-
-    let connection = endpoint.connect(secret_key.public(), ALPN).await?;
-    println!("Connected to {}", connection.remote_id());
-
-    let mut stream = connection.accept_uni().await?;
+    sender.send(Message::Message("Connecting..."))?;
 
     loop {
-        match read_frame(&mut stream, &framebuffer).await {
-            Ok(()) => sender.send(Message::Updated)?,
+        let Ok(connection) = endpoint.connect(kindle_key.public(), ALPN).await else {
+            sender.send(Message::Message("Retrying..."))?;
+            continue;
+        };
+
+        println!("Connected to {}", connection.remote_id());
+
+        match Stream::new(&sender, &connection).await {
+            Ok(stream) => {
+                if let Err(err) = stream.run().await {
+                    eprintln!("Error running stream: {err:#?}");
+                }
+            }
             Err(err) => {
-                println!("Error reading frame: {err:#?}");
-                break;
+                eprintln!("Error initializing stream: {err:#?}");
             }
         }
+
+        connection.close(0u8.into(), &[]);
+        sender.send(Message::Closed)?;
     }
-
-    stream.stop(0u8.into())?;
-    connection.close(0u8.into(), &[]);
-
-    Ok(())
 }
 
-async fn read_frame(
-    stream: &mut RecvStream,
-    framebuffer: &Arc<Mutex<Vec<u8>>>,
-) -> anyhow::Result<()> {
-    let chunks = stream.read_u64().await?;
+struct Stream<'a> {
+    sender: &'a mpsc::UnboundedSender<Message>,
+    info: messages::Info,
+    stream: RecvStream,
+    framebuffer: Arc<Mutex<Box<[u8]>>>,
+    encode_buffer: Box<[u8]>,
+    decode_buffer: Box<[u8]>,
+}
 
-    let mut encoded = vec![0; lz4_flex::block::get_maximum_output_size(CHUNK_WIDTH * CHUNK_HEIGHT)];
-    let mut decoded = vec![0; CHUNK_WIDTH * CHUNK_HEIGHT];
+impl<'a> Stream<'a> {
+    async fn new(
+        sender: &'a mpsc::UnboundedSender<Message>,
+        connection: &Connection,
+    ) -> anyhow::Result<Self> {
+        let mut stream = connection.accept_uni().await?;
 
-    for _ in 0..chunks {
-        let x = stream.read_u8().await?;
-        let y = stream.read_u8().await?;
-        let encoded_len = stream.read_u64().await? as usize;
-        stream.read_exact(&mut encoded[..encoded_len]).await?;
+        let info = messages::read_info(&mut stream).await?;
 
-        {
-            let mut lock = framebuffer.lock().unwrap();
+        let framebuffer = Arc::new(Mutex::new(vec![0; info.display_size()].into_boxed_slice()));
 
-            decode_chunk(&mut lock, &mut decoded, x, y, &encoded[..encoded_len]);
+        let encode_buffer =
+            vec![0; lz4_flex::block::get_maximum_output_size(info.chunk_size())].into_boxed_slice();
+
+        let decode_buffer = vec![0; info.chunk_size()].into_boxed_slice();
+
+        sender.send(Message::Connected {
+            info: info.clone(),
+            framebuffer: Arc::clone(&framebuffer),
+        })?;
+
+        Ok(Self {
+            stream,
+            info,
+            sender,
+            framebuffer,
+            encode_buffer,
+            decode_buffer,
+        })
+    }
+
+    async fn run(mut self) -> anyhow::Result<()> {
+        loop {
+            messages::read_frame(
+                &self.info,
+                &mut self.stream,
+                &mut self.encode_buffer,
+                &mut self.decode_buffer,
+                &self.framebuffer,
+            )
+            .await?;
+
+            self.sender.send(Message::Updated)?;
         }
-    }
-
-    Ok(())
-}
-
-pub fn decode_chunk(framebuffer: &mut [u8], decoded: &mut [u8], x: u8, y: u8, data: &[u8]) {
-    lz4_flex::block::decompress_into(data, decoded).expect("decompression shouldn't fail");
-
-    let frame_top_left_x = x as usize * CHUNK_WIDTH;
-    let frame_top_left_y = y as usize * CHUNK_HEIGHT;
-
-    for row in 0..CHUNK_HEIGHT {
-        let frame_start = frame_top_left_x + (frame_top_left_y + row) * DISPLAY_WIDTH;
-        let buffer_start = row * CHUNK_WIDTH;
-
-        framebuffer[frame_start..frame_start + CHUNK_WIDTH]
-            .copy_from_slice(&decoded[buffer_start..buffer_start + CHUNK_WIDTH]);
     }
 }
