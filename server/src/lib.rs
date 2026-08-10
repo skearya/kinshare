@@ -48,7 +48,7 @@ pub async fn run(sender: mpsc::UnboundedSender<Message>) -> anyhow::Result<()> {
         .address_lookup(MdnsAddressLookup::builder())
         .transport_config(
             QuicTransportConfig::builder()
-                .max_idle_timeout(Some(Duration::from_secs(5).try_into()?))
+                .max_idle_timeout(Some(Duration::from_secs(10).try_into()?))
                 .build(),
         )
         .alpns(vec![ALPN.to_vec()])
@@ -79,6 +79,7 @@ pub async fn run(sender: mpsc::UnboundedSender<Message>) -> anyhow::Result<()> {
         }
 
         connection.close(0u8.into(), &[]);
+        sender.send(Message::Closed)?;
     }
 }
 

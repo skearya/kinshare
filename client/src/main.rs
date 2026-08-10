@@ -41,7 +41,7 @@ async fn run() -> anyhow::Result<()> {
         .address_lookup(MdnsAddressLookup::builder())
         .transport_config(
             QuicTransportConfig::builder()
-                .max_idle_timeout(Some(Duration::from_secs(5).try_into()?))
+                .max_idle_timeout(Some(Duration::from_secs(10).try_into()?))
                 .build(),
         )
         .alpns(vec![ALPN.to_vec()])
