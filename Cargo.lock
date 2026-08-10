@@ -2798,9 +2798,11 @@ name = "kinshare-shared"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "iroh",
  "libc",
  "lz4_flex",
  "rustc-hash 2.1.3",
+ "tokio",
 ]
 
 [[package]]

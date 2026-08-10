@@ -1,15 +1,16 @@
-use std::{hash::Hasher, io, os::fd::AsRawFd, thread, time::Duration};
+use std::{io, os::fd::AsRawFd, thread, time::Duration};
 
 use iroh::{
     Endpoint, SecretKey,
     endpoint::{Connection, QuicTransportConfig, SendStream, presets},
 };
 use iroh_mdns_address_lookup::MdnsAddressLookup;
-use kinshare_shared::{Info, consts::ALPN};
-use rustc_hash::FxHasher;
+use kinshare_shared::{
+    consts::ALPN,
+    messages::{self, Chunk, Info},
+};
 use tokio::{
     fs,
-    io::AsyncWriteExt,
     time::{self, Interval, MissedTickBehavior},
 };
 
@@ -93,15 +94,6 @@ struct Stream {
     interval: Interval,
 }
 
-struct Chunk {
-    x: usize,
-    y: usize,
-    hash: u64,
-    encoded: Box<[u8]>,
-    encoded_len: usize,
-    updated: bool,
-}
-
 impl Stream {
     async fn new(connection: &Connection) -> anyhow::Result<Self> {
         let file = Framebuffer::open().expect("framebuffer failed to open?");
@@ -140,7 +132,7 @@ impl Stream {
 
         let mut stream = connection.open_uni().await?;
 
-        write_info(&mut stream, &info).await?;
+        messages::write_info(&mut stream, &info).await?;
 
         Ok(Self {
             stream,
@@ -187,15 +179,7 @@ impl Stream {
                         }
 
                         for chunk in chunks.iter_mut() {
-                            encode_chunk(
-                                framebuffer,
-                                file_offset,
-                                buffer,
-                                chunk,
-                                info.chunk_width(),
-                                info.chunk_height(),
-                                info.display_width,
-                            );
+                            messages::encode_chunk(info, file_offset, framebuffer, buffer, chunk);
                         }
                     });
                 }
@@ -204,82 +188,8 @@ impl Stream {
             let updated = self.chunks.iter().filter(|c| c.updated).count();
 
             if updated != 0 {
-                write_frame(&mut self.stream, &mut self.chunks, updated).await?;
+                messages::write_frame(&mut self.stream, &mut self.chunks, updated).await?;
             }
         }
     }
-}
-
-async fn write_info(stream: &mut SendStream, info: &Info) -> anyhow::Result<()> {
-    stream.write_u64(info.display_width as u64).await?;
-    stream.write_u64(info.display_height as u64).await?;
-    stream.write_u64(info.chunks_per_x as u64).await?;
-    stream.write_u64(info.chunks_per_y as u64).await?;
-    stream.write_u64(info.thread_count as u64).await?;
-    stream.write_f64(info.fps).await?;
-
-    Ok(())
-}
-
-fn encode_chunk(
-    framebuffer: &[u8],
-    offset: usize,
-    buffer: &mut [u8],
-    chunk: &mut Chunk,
-    chunk_width: usize,
-    chunk_height: usize,
-    display_width: usize,
-) {
-    let frame_top_left_x = chunk.x * chunk_width;
-    let frame_top_left_y = chunk.y * chunk_height;
-
-    let mut hasher = FxHasher::default();
-
-    for row in 0..chunk_height {
-        let frame_start = (frame_top_left_x + (frame_top_left_y + row) * display_width) - offset;
-
-        hasher.write(&framebuffer[frame_start..frame_start + chunk_width]);
-    }
-
-    let hash = hasher.finish();
-
-    if chunk.hash == hash {
-        chunk.updated = false;
-        return;
-    }
-
-    for row in 0..chunk_height {
-        let frame_start = (frame_top_left_x + (frame_top_left_y + row) * display_width) - offset;
-        let buffer_start = row * chunk_width;
-
-        buffer[buffer_start..buffer_start + chunk_width]
-            .copy_from_slice(&framebuffer[frame_start..frame_start + chunk_width]);
-    }
-
-    chunk.hash = hash;
-    chunk.encoded_len = lz4_flex::block::compress_into(buffer, &mut chunk.encoded)
-        .expect("compression shouldn't fail");
-
-    chunk.updated = true;
-}
-
-async fn write_frame(
-    stream: &mut SendStream,
-    chunks: &mut [Chunk],
-    updated: usize,
-) -> anyhow::Result<()> {
-    stream.write_u64(updated as u64).await?;
-
-    for chunk in chunks.iter_mut().filter(|c| c.updated) {
-        stream.write_u8(chunk.x as u8).await?;
-        stream.write_u8(chunk.y as u8).await?;
-        stream.write_u64(chunk.encoded_len as u64).await?;
-        stream
-            .write_all(&chunk.encoded[..chunk.encoded_len])
-            .await?;
-
-        chunk.updated = false;
-    }
-
-    Ok(())
 }

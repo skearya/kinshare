@@ -6,7 +6,7 @@ use iced::wgpu::util::DeviceExt;
 use iced::widget::{Column, Stack, center, shader, text};
 use iced::{Alignment, Element, Length, Subscription, Theme, wgpu};
 
-use kinshare_shared::Info;
+use kinshare_shared::messages::Info;
 use tokio::sync::mpsc;
 
 pub fn main() -> iced::Result {
@@ -44,7 +44,7 @@ impl State {
 
     fn update(&mut self, Message::Server(server): Message) {
         match server {
-            kinshare_server::Message::Info(message) => self.messages.push(message),
+            kinshare_server::Message::Message(message) => self.messages.push(message),
             kinshare_server::Message::Connected { info, framebuffer } => {
                 self.stream = Some(Arc::new(StreamState {
                     info,

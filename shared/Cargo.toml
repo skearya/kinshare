@@ -8,3 +8,5 @@ libc = { workspace = true }
 anyhow = { workspace = true }
 rustc-hash = { workspace = true }
 lz4_flex = { workspace = true }
+iroh = { workspace = true }
+tokio = { workspace = true }
