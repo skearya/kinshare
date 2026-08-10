@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex};
 
 use iced::futures::SinkExt;
 use iced::wgpu::util::DeviceExt;
-use iced::widget::{Stack, shader};
-use iced::{Element, Length, Subscription, Theme, wgpu};
+use iced::widget::{Column, Stack, center, shader, text};
+use iced::{Alignment, Element, Length, Subscription, Theme, wgpu};
 
 use tokio::sync::mpsc;
 
@@ -20,29 +20,31 @@ pub fn main() -> iced::Result {
 }
 
 struct State {
-    screen: Option<Arc<Mutex<Vec<u8>>>>,
+    info: Vec<&'static str>,
+    screen: Option<Arc<Mutex<Box<[u8]>>>>,
     updated: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone)]
 enum Message {
-    Server(server::Message),
+    Server(kinshare_server::Message),
 }
 
 impl State {
     fn default() -> Self {
         Self {
+            info: vec!["Initializing..."],
             screen: None,
             updated: Arc::new(AtomicBool::new(true)),
         }
     }
 
-    fn update(&mut self, message: Message) {
-        match message {
-            Message::Server(server) => match server {
-                server::Message::Screen(screen) => self.screen = Some(screen),
-                server::Message::Updated => self.updated.store(true, Ordering::Relaxed),
-            },
+    fn update(&mut self, Message::Server(server): Message) {
+        match server {
+            kinshare_server::Message::Info(message) => self.info.push(message),
+            kinshare_server::Message::Connected(screen) => self.screen = Some(screen),
+            kinshare_server::Message::Updated => self.updated.store(true, Ordering::Relaxed),
+            kinshare_server::Message::Closed => self.screen = None,
         }
     }
 
@@ -58,6 +60,12 @@ impl State {
                 .width(Length::Fill)
                 .height(Length::Fill),
             );
+        } else {
+            stack = stack.push(center(
+                Column::with_children(self.info.iter().map(|msg| text!("{}", msg).into()))
+                    .align_x(Alignment::Center)
+                    .spacing(4.0),
+            ))
         }
 
         stack.into()
@@ -80,7 +88,7 @@ fn stream() -> impl iced::futures::Stream<Item = Message> {
     iced::stream::channel(64, async |mut output| {
         let (sender, mut receiver) = mpsc::unbounded_channel();
 
-        tokio::spawn(async { server::run(sender).await });
+        tokio::spawn(async { kinshare_server::run(sender).await });
 
         while let Some(message) = receiver.recv().await {
             output.send(Message::Server(message)).await.ok();
@@ -89,7 +97,7 @@ fn stream() -> impl iced::futures::Stream<Item = Message> {
 }
 
 struct KindleView<'a> {
-    screen: &'a Arc<Mutex<Vec<u8>>>,
+    screen: &'a Arc<Mutex<Box<[u8]>>>,
     updated: &'a Arc<AtomicBool>,
 }
 
@@ -112,7 +120,7 @@ impl<Message> shader::Program<Message> for KindleView<'_> {
 
 #[derive(Debug)]
 struct KindlePrimitive {
-    screen: Arc<Mutex<Vec<u8>>>,
+    screen: Arc<Mutex<Box<[u8]>>>,
     updated: Arc<AtomicBool>,
 }
 
@@ -122,25 +130,38 @@ impl shader::Primitive for KindlePrimitive {
     fn prepare(
         &self,
         pipeline: &mut Self::Pipeline,
-        _device: &iced::wgpu::Device,
+        device: &iced::wgpu::Device,
         queue: &iced::wgpu::Queue,
         _bounds: &iced::Rectangle,
         viewport: &iced::widget::shader::Viewport,
     ) {
-        if self.updated.swap(false, Ordering::AcqRel) {
-            pipeline.update_screen(queue, &self.screen.lock().unwrap());
+        let standard_uniform = StandardUniform {
+            screen_size: [
+                viewport.physical_width() as f32,
+                viewport.physical_height() as f32,
+            ],
+            kindle_size: [DISPLAY_WIDTH as f32, DISPLAY_HEIGHT as f32],
+        };
+
+        if pipeline.inner.is_none() {
+            pipeline.init(
+                device,
+                DISPLAY_WIDTH as u32,
+                DISPLAY_HEIGHT as u32,
+                standard_uniform,
+            );
         }
 
-        pipeline.update_standard(
-            queue,
-            StandardUniform {
-                screen_size: [
-                    viewport.physical_width() as f32,
-                    viewport.physical_height() as f32,
-                ],
-                kindle_size: [DISPLAY_WIDTH as f32, DISPLAY_HEIGHT as f32],
-            },
-        );
+        if self.updated.swap(false, Ordering::AcqRel) {
+            pipeline.update_screen(
+                queue,
+                DISPLAY_WIDTH as u32,
+                DISPLAY_HEIGHT as u32,
+                &self.screen.lock().unwrap(),
+            );
+        }
+
+        pipeline.update_standard(queue, standard_uniform);
     }
 
     fn draw(&self, pipeline: &Self::Pipeline, render_pass: &mut wgpu::RenderPass<'_>) -> bool {
@@ -151,6 +172,11 @@ impl shader::Primitive for KindlePrimitive {
 }
 
 struct KindlePipeline {
+    format: iced::wgpu::TextureFormat,
+    inner: Option<KindlePipelineInner>,
+}
+
+struct KindlePipelineInner {
     screen_texture: wgpu::Texture,
     screen_texture_bind_group: wgpu::BindGroup,
     standard_uniform_buffer: wgpu::Buffer,
@@ -167,18 +193,33 @@ struct StandardUniform {
 
 impl shader::Pipeline for KindlePipeline {
     fn new(
-        device: &iced::wgpu::Device,
+        _device: &iced::wgpu::Device,
         _queue: &iced::wgpu::Queue,
         format: iced::wgpu::TextureFormat,
     ) -> Self
     where
         Self: Sized,
     {
+        Self {
+            format,
+            inner: None,
+        }
+    }
+}
+
+impl KindlePipeline {
+    fn init(
+        &mut self,
+        device: &iced::wgpu::Device,
+        display_width: u32,
+        display_height: u32,
+        standard_uniform: StandardUniform,
+    ) {
         let screen_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Screen Texture"),
             size: wgpu::Extent3d {
-                width: DISPLAY_WIDTH as u32,
-                height: DISPLAY_HEIGHT as u32,
+                width: display_width,
+                height: display_height,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -235,11 +276,6 @@ impl shader::Pipeline for KindlePipeline {
                 },
             ],
         });
-
-        let standard_uniform = StandardUniform {
-            screen_size: [0.0, 0.0],
-            kindle_size: [0.0, 0.0],
-        };
 
         let standard_uniform_buffer =
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -308,7 +344,7 @@ impl shader::Pipeline for KindlePipeline {
                 entry_point: Some("fs_main"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format,
+                    format: self.format,
                     blend: Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -317,29 +353,41 @@ impl shader::Pipeline for KindlePipeline {
             cache: None,
         });
 
-        Self {
+        self.inner = Some(KindlePipelineInner {
             screen_texture,
             screen_texture_bind_group,
             standard_uniform_buffer,
             standard_uniform_bind_group,
             render_pipeline,
-        }
+        });
     }
-}
 
-impl KindlePipeline {
     fn update_standard(&self, queue: &wgpu::Queue, standard_uniform: StandardUniform) {
+        let Some(inner) = &self.inner else {
+            return;
+        };
+
         queue.write_buffer(
-            &self.standard_uniform_buffer,
+            &inner.standard_uniform_buffer,
             0,
             bytemuck::cast_slice(&[standard_uniform]),
         );
     }
 
-    fn update_screen(&self, queue: &wgpu::Queue, screen: &[u8]) {
+    fn update_screen(
+        &self,
+        queue: &wgpu::Queue,
+        display_width: u32,
+        display_height: u32,
+        screen: &[u8],
+    ) {
+        let Some(inner) = &self.inner else {
+            return;
+        };
+
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
-                texture: &self.screen_texture,
+                texture: &inner.screen_texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -347,21 +395,25 @@ impl KindlePipeline {
             screen,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(DISPLAY_WIDTH as u32),
-                rows_per_image: Some(DISPLAY_HEIGHT as u32),
+                bytes_per_row: Some(display_width),
+                rows_per_image: Some(display_height),
             },
             wgpu::Extent3d {
-                width: DISPLAY_WIDTH as u32,
-                height: DISPLAY_HEIGHT as u32,
+                width: display_width,
+                height: display_height,
                 depth_or_array_layers: 1,
             },
         );
     }
 
     fn draw(&self, render_pass: &mut wgpu::RenderPass<'_>) {
-        render_pass.set_pipeline(&self.render_pipeline);
-        render_pass.set_bind_group(0, &self.screen_texture_bind_group, &[]);
-        render_pass.set_bind_group(1, &self.standard_uniform_bind_group, &[]);
+        let Some(inner) = &self.inner else {
+            return;
+        };
+
+        render_pass.set_pipeline(&inner.render_pipeline);
+        render_pass.set_bind_group(0, &inner.screen_texture_bind_group, &[]);
+        render_pass.set_bind_group(1, &inner.standard_uniform_bind_group, &[]);
         render_pass.draw(0..3, 0..1);
     }
 }

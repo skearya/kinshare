@@ -1,10 +1,10 @@
 [package]
-name = "client"
+name = "kinshare-client"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-shared = { path = "../shared" }
+kinshare-shared = { path = "../shared" }
 libc = { workspace = true }
 anyhow = { workspace = true }
 rustc-hash = { workspace = true }

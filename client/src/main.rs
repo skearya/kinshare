@@ -2,11 +2,11 @@ use std::{hash::Hasher, io, os::fd::AsRawFd, thread, time::Duration};
 
 use iroh::{
     Endpoint, SecretKey,
-    endpoint::{Connection, SendStream},
+    endpoint::{Connection, QuicTransportConfig, SendStream, presets},
 };
 use iroh_mdns_address_lookup::MdnsAddressLookup;
+use kinshare_shared::consts::ALPN;
 use rustc_hash::FxHasher;
-use shared::consts::ALPN;
 use tokio::{
     fs,
     io::AsyncWriteExt,
@@ -20,68 +20,71 @@ mod framebuffer;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
-    assert!(cfg!(target_os = "linux"), "not running on a kindle?");
+    const { assert!(cfg!(target_os = "linux"), "not running on a kindle?") }
 
-    Client::run().await?;
+    run().await
+}
+
+async fn run() -> anyhow::Result<()> {
+    let (server_key, kindle_key) = if let Ok(bytes) = fs::read("connection.keys").await {
+        (
+            SecretKey::from_bytes(&bytes[..32].try_into()?),
+            SecretKey::from_bytes(&bytes[32..64].try_into()?),
+        )
+    } else {
+        panic!("missing 'connection.keys' file")
+    };
+
+    let endpoint = Endpoint::builder(presets::N0)
+        .secret_key(kindle_key)
+        .address_lookup(MdnsAddressLookup::builder())
+        .transport_config(
+            QuicTransportConfig::builder()
+                .max_idle_timeout(Some(Duration::from_secs(5).try_into()?))
+                .build(),
+        )
+        .alpns(vec![ALPN.to_vec()])
+        .bind()
+        .await?;
+
+    println!("Endpoint id: {}", endpoint.id().to_z32());
+
+    while let Some(incoming) = endpoint.accept().await {
+        let connection = incoming.await?;
+
+        if server_key.public() == connection.remote_id() {
+            println!("Connected to: {}", connection.remote_id());
+        } else {
+            println!(
+                "Non-server tried connecting to us: {}",
+                connection.remote_id()
+            );
+
+            connection.close(0u8.into(), b"Unauthorized");
+            continue;
+        }
+
+        match Stream::new(&connection).await {
+            Ok(stream) => {
+                if let Err(err) = stream.run().await {
+                    eprintln!("Error running stream: {err:#?}");
+                }
+            }
+            Err(err) => {
+                eprintln!("Error initializing stream: {err:#?}");
+            }
+        }
+
+        connection.close(0u8.into(), &[]);
+    }
 
     Ok(())
 }
 
-struct Client;
-
-impl Client {
-    async fn run() -> anyhow::Result<Self> {
-        let secret_key = if let Ok(bytes) = fs::read("kindle.key").await {
-            SecretKey::from_bytes(&bytes.as_slice().try_into()?)
-        } else {
-            panic!("missing kindle.key")
-        };
-
-        let endpoint = Endpoint::builder(iroh::endpoint::presets::N0)
-            .secret_key(secret_key)
-            .address_lookup(MdnsAddressLookup::builder())
-            .alpns(vec![ALPN.to_vec()])
-            .bind()
-            .await?;
-
-        tokio::spawn({
-            let endpoint = endpoint.clone();
-
-            async move {
-                tokio::signal::ctrl_c().await?;
-                endpoint.close().await;
-
-                anyhow::Ok(())
-            }
-        });
-
-        while let Some(incoming) = endpoint.accept().await {
-            let connection = incoming.await?;
-            println!("Connected to {}", connection.remote_id());
-
-            let mut stream = match Stream::new(&connection).await {
-                Ok(stream) => stream,
-                Err(err) => {
-                    eprintln!("Error initializing stream: {err:#?}");
-                    continue;
-                }
-            };
-
-            if let Err(err) = stream.run().await {
-                eprintln!("Error running stream: {err:#?}");
-            }
-
-            connection.close(0u8.into(), &[]);
-        }
-
-        Ok(Self {})
-    }
-}
-
 struct Stream {
-    send: SendStream,
     info: Info,
     file: Framebuffer,
+    stream: SendStream,
     screen: Box<[u8]>,
     chunks: Box<[Chunk]>,
     encode_buffers: Box<[Box<[u8]>]>,
@@ -164,10 +167,10 @@ impl Stream {
         let mut interval = time::interval(Duration::from_secs_f64(1.0 / info.fps));
         interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
-        let send = connection.open_uni().await?;
+        let stream = connection.open_uni().await?;
 
         Ok(Self {
-            send,
+            stream,
             info,
             file,
             screen,
@@ -177,7 +180,7 @@ impl Stream {
         })
     }
 
-    async fn run(&mut self) -> anyhow::Result<()> {
+    async fn run(mut self) -> anyhow::Result<()> {
         loop {
             self.interval.tick().await;
 
@@ -228,7 +231,7 @@ impl Stream {
             let updated = self.chunks.iter().filter(|c| c.updated).count();
 
             if updated != 0 {
-                write_frame(updated, &mut self.chunks, &mut self.send).await?;
+                write_frame(&mut self.stream, &mut self.chunks, updated).await?;
             }
         }
     }
@@ -252,38 +255,44 @@ fn encode_chunk(
         let frame_start = (frame_top_left_x + (frame_top_left_y + row) * display_width) - offset;
 
         hasher.write(&framebuffer[frame_start..frame_start + chunk_width]);
-
-        let buffer_start = row * chunk_width;
-
-        buffer[buffer_start..buffer_start + chunk_width]
-            .copy_from_slice(&framebuffer[frame_start..frame_start + chunk_width]);
     }
 
     let hash = hasher.finish();
 
     if chunk.hash == hash {
         chunk.updated = false;
-    } else {
-        chunk.hash = hash;
-        chunk.encoded_len = lz4_flex::block::compress_into(buffer, &mut chunk.encoded)
-            .expect("compression shouldn't fail");
-
-        chunk.updated = true;
+        return;
     }
+
+    for row in 0..chunk_height {
+        let frame_start = (frame_top_left_x + (frame_top_left_y + row) * display_width) - offset;
+        let buffer_start = row * chunk_width;
+
+        buffer[buffer_start..buffer_start + chunk_width]
+            .copy_from_slice(&framebuffer[frame_start..frame_start + chunk_width]);
+    }
+
+    chunk.hash = hash;
+    chunk.encoded_len = lz4_flex::block::compress_into(buffer, &mut chunk.encoded)
+        .expect("compression shouldn't fail");
+
+    chunk.updated = true;
 }
 
 async fn write_frame(
-    updated: usize,
+    stream: &mut SendStream,
     chunks: &mut [Chunk],
-    send: &mut SendStream,
+    updated: usize,
 ) -> anyhow::Result<()> {
-    send.write_u64(updated as u64).await?;
+    stream.write_u64(updated as u64).await?;
 
     for chunk in chunks.iter_mut().filter(|c| c.updated) {
-        send.write_u8(chunk.x as u8).await?;
-        send.write_u8(chunk.y as u8).await?;
-        send.write_u64(chunk.encoded_len as u64).await?;
-        send.write_all(&chunk.encoded[..chunk.encoded_len]).await?;
+        stream.write_u8(chunk.x as u8).await?;
+        stream.write_u8(chunk.y as u8).await?;
+        stream.write_u64(chunk.encoded_len as u64).await?;
+        stream
+            .write_all(&chunk.encoded[..chunk.encoded_len])
+            .await?;
 
         chunk.updated = false;
     }
