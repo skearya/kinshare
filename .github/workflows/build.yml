@@ -64,15 +64,12 @@ jobs:
                 include:
                     - os: ubuntu-latest
                       target: x86_64-unknown-linux-gnu
-                      output: kinshare-desktop
 
                     - os: windows-latest
                       target: x86_64-pc-windows-msvc
-                      output: kinshare-desktop.exe
 
                     - os: macos-latest
                       target: aarch64-apple-darwin
-                      output: kinshare-desktop
         steps:
             - name: Checkout repository
               uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
@@ -88,11 +85,18 @@ jobs:
             - name: Build
               run: cargo build --release --bin kinshare-desktop --target ${{ matrix.target }}
 
-            - name: Rename
+            - name: Package (windows)
+              if: matrix.os == 'windows-latest'
+              shell: pwsh
               run: |
-                  mv target/${{ matrix.target }}/release/${{ matrix.output }} ${{ matrix.target }}-${{ matrix.output }}
+                  Compress-Archive -Path "target/${{ matrix.target }}/release/kinshare-desktop.exe" -DestinationPath "kinshare-desktop-${{ matrix.target }}.zip"
+
+            - name: Package (non-windows)
+              if: matrix.os != 'windows-latest'
+              run: |
+                  tar -czvf kinshare-desktop-${{ matrix.target }}.tar.gz target/${{ matrix.target }}/release/kinshare-desktop
 
             - name: Upload
               uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228
               with:
-                  files: ${{ matrix.target }}-${{ matrix.output }}
+                  files: kinshare-desktop-${{ matrix.target }}.${{ matrix.os == 'windows-latest' && 'zip' || 'tar.gz' }}
