@@ -21,38 +21,16 @@ jobs:
               with:
                   persist-credentials: false
 
-            - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-              with:
-                  path: |
-                      ~/.cargo/bin/
-                      ~/.cargo/registry/index/
-                      ~/.cargo/registry/cache/
-                      ~/.cargo/git/db/
-                      target
-                  key: ${{ runner.os }}-${{ runner.arch }}-cargo-debug-${{ hashFiles('**/Cargo.lock') }}
-                  restore-keys: |
-                      ${{ runner.os }}-${{ runner.arch }}-cargo-debug-
-
             - name: Install dependencies
               run: |
                   sudo apt update
                   sudo apt install -y just zip
 
-            - name: Install zig
-              run: |
-                  case ${{ runner.arch }} in
-                    X86) ARCH="x86" ;;
-                    X64) ARCH="x86_64" ;;
-                    ARM) ARCH="arm" ;;
-                    ARM64) ARCH="aarch64" ;;
-                  esac
-
-                  curl -O "https://ziglang.org/download/0.16.0/zig-${ARCH}-linux-0.16.0.tar.xz"
-                  tar xf "zig-${ARCH}-linux-0.16.0.tar.xz"
-                  echo "$PWD/zig-${ARCH}-linux-0.16.0" >> $GITHUB_PATH
+            - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
 
             - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659
               with:
+                  cache-key: "kindle"
                   target: armv7-unknown-linux-musleabihf
                   rustflags: ""
 
@@ -101,20 +79,9 @@ jobs:
               with:
                   persist-credentials: false
 
-            - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-              with:
-                  path: |
-                      ~/.cargo/bin/
-                      ~/.cargo/registry/index/
-                      ~/.cargo/registry/cache/
-                      ~/.cargo/git/db/
-                      target
-                  key: ${{ runner.os }}-${{ runner.arch }}-cargo-debug-${{ hashFiles('**/Cargo.lock') }}
-                  restore-keys: |
-                      ${{ runner.os }}-${{ runner.arch }}-cargo-debug-
-
             - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659
               with:
+                  cache-key: ${{ matrix.target }}
                   target: ${{ matrix.target }}
                   rustflags: ""
 
