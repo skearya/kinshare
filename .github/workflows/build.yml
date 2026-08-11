@@ -43,6 +43,9 @@ jobs:
               with:
                   target: armv7-unknown-linux-musleabihf
 
+            - name: Install cargo-zigbuild
+              run: cargo install --locked cargo-zigbuild
+
             - name: Build
               run: just build
 
