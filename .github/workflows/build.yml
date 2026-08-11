@@ -37,7 +37,7 @@ jobs:
 
                   curl -O "https://ziglang.org/download/0.16.0/zig-${ARCH}-linux-0.16.0.tar.xz"
                   tar xf "zig-${ARCH}-linux-0.16.0.tar.xz"
-                  echo "zig-${ARCH}-linux-0.16.0" >> $GITHUB_PATH
+                  echo "$PWD/zig-${ARCH}-linux-0.16.0" >> $GITHUB_PATH
 
             - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659
               with:
