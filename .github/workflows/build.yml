@@ -90,11 +90,11 @@ jobs:
 
                     - os: windows-latest
                       target: x86_64-pc-windows-msvc
-                      output: kinshare-desktop
+                      output: kinshare-desktop.exe
 
                     - os: macos-latest
                       target: aarch64-apple-darwin
-                      output: kinshare-desktop.exe
+                      output: kinshare-desktop
         steps:
             - name: Checkout repository
               uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
