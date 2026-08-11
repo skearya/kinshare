@@ -119,7 +119,7 @@ jobs:
                   rustflags: ""
 
             - name: Build
-              run: cargo build --release --target ${{ matrix.target }}
+              run: cargo build --release --bin kinshare-desktop --target ${{ matrix.target }}
 
             - name: Rename
               run: |
