@@ -1,4 +1,4 @@
-set dotenv-required
+set dotenv-load
 
 BIN := "kinshare-client"
 
