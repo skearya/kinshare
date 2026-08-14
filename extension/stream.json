@@ -1,0 +1,8 @@
+{
+	"display_width": 1872,
+	"display_height": 2480,
+	"chunks_per_x": 8,
+	"chunks_per_y": 8,
+	"thread_count": 2,
+	"fps": 60.0
+}

@@ -12,4 +12,6 @@ lz4_flex = { workspace = true }
 tokio = { workspace = true }
 iroh = { workspace = true }
 iroh-mdns-address-lookup = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 crc-fast = "1"

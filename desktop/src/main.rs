@@ -50,7 +50,7 @@ impl State {
                     info,
                     updated: AtomicBool::new(true),
                     framebuffer,
-                }))
+                }));
             }
             kinshare_server::Message::Updated => {
                 let Some(stream) = &self.stream else {
@@ -77,7 +77,7 @@ impl State {
                 Column::with_children(self.messages.iter().map(|msg| text!("{}", msg).into()))
                     .align_x(Alignment::Center)
                     .spacing(4.0),
-            ))
+            ));
         }
 
         stack.into()
@@ -164,6 +164,8 @@ impl shader::Primitive for KindlePrimitive {
             );
         }
 
+        pipeline.update_standard(queue, standard_uniform);
+
         if self.stream.updated.swap(false, Ordering::AcqRel) {
             pipeline.update_screen(
                 queue,
@@ -172,8 +174,6 @@ impl shader::Primitive for KindlePrimitive {
                 &self.stream.framebuffer.lock().unwrap(),
             );
         }
-
-        pipeline.update_standard(queue, standard_uniform);
     }
 
     fn draw(&self, pipeline: &Self::Pipeline, render_pass: &mut wgpu::RenderPass<'_>) -> bool {

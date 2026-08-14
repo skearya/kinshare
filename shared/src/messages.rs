@@ -5,9 +5,10 @@ use std::{
 
 use iroh::endpoint::{RecvStream, SendStream};
 use rustc_hash::FxHasher;
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Info {
     pub display_width: usize,
     pub display_height: usize,

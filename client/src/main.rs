@@ -98,14 +98,20 @@ impl Stream {
     async fn new(connection: &Connection) -> anyhow::Result<Self> {
         let file = Framebuffer::open().expect("framebuffer failed to open?");
 
-        let info = Info {
-            display_width: 1872,
-            display_height: 2480,
-            chunks_per_x: 8,
-            chunks_per_y: 8,
-            thread_count: 2,
-            fps: 60.0,
+        let info = match fs::read("/mnt/us/extensions/kinshare/stream.json").await {
+            Ok(data) => serde_json::from_slice::<Info>(&data)?,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Info {
+                display_width: 1872,
+                display_height: 2480,
+                chunks_per_x: 8,
+                chunks_per_y: 8,
+                thread_count: 2,
+                fps: 60.0,
+            },
+            Err(err) => return Err(err.into()),
         };
+
+        println!("Starting stream with config: {info:#?}");
 
         assert_eq!(info.display_width % info.chunks_per_x, 0);
         assert_eq!(info.display_height % info.chunks_per_y, 0);
@@ -135,9 +141,9 @@ impl Stream {
         messages::write_info(&mut stream, &info).await?;
 
         Ok(Self {
-            stream,
             info,
             file,
+            stream,
             screen,
             chunks,
             encode_buffers,
